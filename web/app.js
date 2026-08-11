@@ -95,6 +95,7 @@ function show(view, updateHash = true) {
   document.title = `${titles[view]} · SecurePR Agent`;
   if (updateHash) history.replaceState(null, "", `#${view}`);
 
+  if (view === "overview") loadDashboard();
   if (view === "tasks") loadTasks();
   if (view === "skills") loadSkills();
   if (view === "evolution") loadFailures();
@@ -380,7 +381,7 @@ $("#login-form").addEventListener("submit", async (event) => {
       }),
     });
     accessToken = data.access_token;
-  localStorage.setItem("securepr_token", accessToken);
+    localStorage.setItem("securepr_token", accessToken);
     $("#login-overlay").classList.add("hidden");
     $("#logout").classList.remove("hidden");
     $("#login-error").textContent = "";
@@ -401,4 +402,3 @@ $("#logout").addEventListener("click", () => {
 
 if (accessToken) $("#logout").classList.remove("hidden");
 show(location.hash.slice(1) || "overview", false);
-loadDashboard();

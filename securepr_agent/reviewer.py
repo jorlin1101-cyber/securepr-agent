@@ -6,8 +6,10 @@ import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
+from .deduplication import deduplicate_findings
 from .diff_parser import ParsedDiff
 from .models import Finding, Severity
+from .safety import sanitize_guidance
 
 
 class Reviewer(ABC):
@@ -126,7 +128,9 @@ class OpenAICompatibleReviewer(Reviewer):
             'Return JSON only: {"findings":[{"rule_id":"...","severity":"critical|high|medium|low",'
             '"title":"...","explanation":"...","path":"...","line":1,"evidence":"...",'
             '"fix":"...","test":"...","confidence":0.0}]}. Report only actionable defects introduced '
-            "by added lines. Do not report style preferences. Line numbers must be new-file line numbers."
+            "by added lines. Do not report style preferences. Line numbers must be new-file line numbers. "
+            "Suggested fixes and tests must be non-destructive: never instruct users to delete files, "
+            "wipe data, format disks, or run shutdown/reboot commands."
         )
         payload = {
             "model": self.model,
@@ -181,8 +185,8 @@ class OpenAICompatibleReviewer(Reviewer):
                     path=path,
                     line=line,
                     evidence=str(raw.get("evidence", ""))[:240],
-                    fix=str(raw.get("fix", ""))[:2000],
-                    test=str(raw.get("test", ""))[:2000],
+                    fix=sanitize_guidance(raw.get("fix", "")),
+                    test=sanitize_guidance(raw.get("test", "")),
                     confidence=max(0.0, min(1.0, float(raw.get("confidence", 0.7)))),
                 )
             )
@@ -197,16 +201,15 @@ class CompositeReviewer(Reviewer):
         self.name = "+".join(item.name for item in reviewers)
 
     def review(self, diff: str, parsed: ParsedDiff) -> List[Finding]:
-        merged: Dict[Any, Finding] = {}
+        merged: List[Finding] = []
         errors = []
         for reviewer in self.reviewers:
             try:
                 for finding in reviewer.review(diff, parsed):
-                    key = (finding.path, finding.line, finding.rule_id)
-                    merged[key] = finding
+                    merged.append(finding)
             except Exception as exc:
                 errors.append(exc)
         if not merged and errors and len(errors) == len(self.reviewers):
             raise errors[0]
         order = {Severity.CRITICAL: 0, Severity.HIGH: 1, Severity.MEDIUM: 2, Severity.LOW: 3}
-        return sorted(merged.values(), key=lambda item: (order[item.severity], item.path, item.line))
+        return sorted(deduplicate_findings(merged), key=lambda item: (order[item.severity], item.path, item.line))

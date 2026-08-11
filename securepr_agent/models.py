@@ -2,6 +2,8 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .safety import sanitize_guidance
+
 
 class TaskState(str, Enum):
     PENDING = "PENDING"
@@ -43,6 +45,8 @@ class Finding:
     def to_dict(self) -> Dict[str, Any]:
         value = asdict(self)
         value["severity"] = self.severity.value
+        value["fix"] = sanitize_guidance(value["fix"])
+        value["test"] = sanitize_guidance(value["test"])
         return value
 
 

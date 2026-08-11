@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, TypedDict
 
+from .deduplication import deduplicate_findings, finding_identity
 from .diff_parser import ParsedDiff
 from .models import Finding, Severity
 from .reviewer import Reviewer
@@ -201,10 +202,12 @@ class SynthesizerAgent:
             if finding.severity in {Severity.CRITICAL, Severity.HIGH} and not reproduction.reproducible:
                 continue
             finding.confidence = adjusted
-            identity = (finding.path, finding.line, finding.rule_id)
+            identity = finding_identity(finding)
             current = merged.get(identity)
-            if current is None or finding.confidence > current.confidence:
+            if current is None:
                 merged[identity] = finding
+            else:
+                merged[identity] = deduplicate_findings((current, finding))[0]
         order = {Severity.CRITICAL: 0, Severity.HIGH: 1, Severity.MEDIUM: 2, Severity.LOW: 3}
         return sorted(merged.values(), key=lambda item: (order[item.severity], item.path, item.line))
 

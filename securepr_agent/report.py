@@ -1,5 +1,7 @@
 from typing import Any, Dict
 
+from .safety import sanitize_guidance
+
 
 def to_markdown(report: Dict[str, Any]) -> str:
     title = "# SecurePR Agent Review"
@@ -38,9 +40,9 @@ def to_markdown(report: Dict[str, Any]) -> str:
                 item.get("evidence", ""),
                 "```",
                 "",
-                "**Suggested fix:** %s" % item.get("fix", ""),
+                "**Suggested fix:** %s" % sanitize_guidance(item.get("fix", "")),
                 "",
-                "**Suggested test:** %s" % item.get("test", ""),
+                "**Suggested test:** %s" % sanitize_guidance(item.get("test", "")),
                 "",
             ]
         )

@@ -178,7 +178,9 @@ class SkillRegistry:
         if manifest["permissions"]:
             raise ValueError("review skills currently receive no host permissions")
         with open(module_path, "rb") as handle:
-            source = handle.read()
+            # Git can materialize text files with CRLF on Windows and LF on Linux.
+            # Verify one canonical representation so signed skills are portable.
+            source = handle.read().replace(b"\r\n", b"\n")
         digest = hashlib.sha256(source).hexdigest()
         if not hmac.compare_digest(digest, str(manifest["sha256"])):
             raise ValueError("skill checksum mismatch: %s" % manifest["name"])

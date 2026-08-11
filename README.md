@@ -65,6 +65,13 @@ Invoke-WebRequest -Headers $headers http://127.0.0.1:8080/v1/tasks/<task-id>/rep
 python -m unittest discover -s tests -v
 ```
 
+## 质量与安全边界
+
+- 本地规则与大模型对同一文件、同一行、同一风险类别的重复发现会合并，保留严重度、置信度和说明质量更高的一条。
+- 大模型生成的修复与测试建议会经过安全过滤；删除文件、清空数据、格式化磁盘和关机重启等破坏性命令不会进入任务报告或 PR 评论。
+- GitHub Actions 会在 Pull Request 中执行 Python 3.11 编译检查和完整单元测试。
+- 当前项目用于作品集演示和工程验证，不应将自动生成的审查结果直接视为生产环境安全结论；合并前仍需人工复核。
+
 ## 模型配置
 
 默认 `SECUREPR_LLM_PROVIDER=local`，此时只运行确定性的本地规则 Agent，不会调用大模型。
