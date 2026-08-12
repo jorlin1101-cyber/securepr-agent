@@ -6,7 +6,7 @@ import tempfile
 import time
 import zipfile
 from io import BytesIO
-from typing import Dict, Iterable
+from typing import Dict
 
 
 class RepairVerifier:
@@ -54,7 +54,7 @@ class RepairVerifier:
                 )
                 passed = result.returncode == 0
                 detail = (result.stdout + "\n" + result.stderr)[-8000:]
-            except subprocess.TimeoutExpired as exc:
+            except subprocess.TimeoutExpired:
                 passed = False
                 detail = "verification exceeded %d seconds" % self.timeout_seconds
         return {

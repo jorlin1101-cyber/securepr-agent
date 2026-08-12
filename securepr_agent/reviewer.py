@@ -4,7 +4,7 @@ import socket
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from .deduplication import deduplicate_findings
 from .diff_parser import ParsedDiff

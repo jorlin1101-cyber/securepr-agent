@@ -8,7 +8,7 @@ import base64
 import random
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict
 
 

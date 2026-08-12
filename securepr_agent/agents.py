@@ -6,10 +6,9 @@ checks reproducibility, a synthesizer resolves conflicts, a fix agent checks
 remediation quality, and a verifier makes the final release decision.
 """
 import hashlib
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, TypedDict
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, TypedDict
 
 from .deduplication import deduplicate_findings, finding_identity
 from .diff_parser import ParsedDiff
