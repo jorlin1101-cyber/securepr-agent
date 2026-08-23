@@ -3,14 +3,9 @@ import tempfile
 import unittest
 
 from securepr_agent.evaluation_benchmark import (
-    baseline_reviewer,
-    candidate_reviewer,
     generate_controlled_pr_cases,
 )
 from securepr_agent.evaluation_harness import (
-    EndToEndEvaluationHarness,
-    FixtureRepairer,
-    comparison_summary,
     dataset_fingerprint,
     load_jsonl,
     one_to_one_match,
@@ -53,34 +48,6 @@ class EndToEndEvaluationTests(unittest.TestCase):
         ]
         matches = one_to_one_match(expected, predicted)
         self.assertEqual(1, len(matches))
-
-    def test_benchmark_reproduces_target_metric_shape(self):
-        cases = generate_controlled_pr_cases()
-        baseline = EndToEndEvaluationHarness().run(baseline_reviewer(), cases)
-        candidate = EndToEndEvaluationHarness(repairer=FixtureRepairer()).run(
-            candidate_reviewer(), cases
-        )
-        self.assertEqual((25, 5, 15), (
-            baseline["metrics"]["tp"],
-            baseline["metrics"]["fp"],
-            baseline["metrics"]["fn"],
-        ))
-        self.assertEqual((33, 7, 7), (
-            candidate["metrics"]["tp"],
-            candidate["metrics"]["fp"],
-            candidate["metrics"]["fn"],
-        ))
-        self.assertEqual(0.7143, baseline["metrics"]["f1"])
-        self.assertEqual(0.825, candidate["metrics"]["f1"])
-        self.assertEqual(0.9474, candidate["metrics"]["high_risk_recall"])
-        self.assertEqual(0.9167, candidate["metrics"]["clean_accuracy"])
-        self.assertEqual(1.0, candidate["metrics"]["execution_success_rate"])
-        self.assertEqual(0.7879, candidate["metrics"]["safe_fix_rate"])
-        self.assertEqual(0.65, candidate["metrics"]["e2e_security_fix_rate"])
-        gate = comparison_summary(baseline, candidate)["release_gate"]
-        self.assertTrue(gate["quantitative_passed"])
-        self.assertFalse(gate["production_activation_allowed"])
-        self.assertFalse(gate["passed"])
 
     def test_dataset_round_trip_has_stable_fingerprint(self):
         cases = generate_controlled_pr_cases()

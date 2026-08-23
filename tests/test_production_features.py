@@ -7,6 +7,7 @@ from securepr_agent.auth import AuthManager
 from securepr_agent.harness import ReviewHarness
 from securepr_agent.reviewer import LocalRuleReviewer
 from securepr_agent.rollout import ReleaseManager
+from securepr_agent.service import ReviewService
 from securepr_agent.store import TaskStore
 from securepr_agent.task_queue import TaskQueue
 from securepr_agent.verifier import RepairVerifier
@@ -43,6 +44,16 @@ class ProductionFeatureTests(unittest.TestCase):
         self.assertFalse(self.store.claim_webhook("delivery-1", "t", "pull_request", "aaa"))
         with self.assertRaisesRegex(ValueError, "different payload"):
             self.store.claim_webhook("delivery-1", "t", "pull_request", "bbb")
+
+    def test_failure_cases_are_filtered_by_tenant(self):
+        self.store.create("a", "org/a", 1, {}, "tenant-a")
+        self.store.create("b", "org/b", 2, {}, "tenant-b")
+        self.store.record_failure_case("a", "false_positive", {"note": "a"})
+        self.store.record_failure_case("b", "missed_issue", {"note": "b"})
+
+        cases = self.store.list_failure_cases(tenant_id="tenant-a")
+
+        self.assertEqual(["a"], [item["task_id"] for item in cases])
 
     def test_failed_graph_resumes_after_last_completed_checkpoint(self):
         class BrokenReviewer:
@@ -83,6 +94,17 @@ class ProductionFeatureTests(unittest.TestCase):
         queue.close()
         self.assertEqual("dead", letters[0]["message_id"])
         self.assertIn("boom", letters[0]["error"])
+
+    def test_dead_letter_marks_pending_task_failed(self):
+        self.store.create("dead", "org/repo", 1, {}, "tenant")
+        service = ReviewService.__new__(ReviewService)
+        service.store = self.store
+
+        service._on_dead_letter({"task_id": "dead", "tenant_id": "tenant"}, "boom")
+
+        task = self.store.get("dead", "tenant")
+        self.assertEqual("FAILED", task["state"])
+        self.assertEqual("boom", task["error"])
 
     def test_canary_assignment_and_error_budget_rollback(self):
         release = ReleaseManager(self.store)

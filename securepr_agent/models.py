@@ -22,6 +22,14 @@ class Severity(str, Enum):
     LOW = "low"
 
 
+class ComponentKind(str, Enum):
+    """Product-level component taxonomy; names describe behavior, not branding."""
+
+    LLM_AGENT = "llm-agent"
+    TOOL_SCANNER = "tool-scanner"
+    GATE = "gate"
+
+
 @dataclass
 class ChangedLine:
     path: str
@@ -41,6 +49,10 @@ class Finding:
     fix: str
     test: str
     confidence: float = 0.8
+    evidence_refs: List[Dict[str, Any]] = field(default_factory=list)
+    call_chain: List[Dict[str, Any]] = field(default_factory=list)
+    source: str = "unknown"
+    gate: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         value = asdict(self)
@@ -59,6 +71,10 @@ class ReviewReport:
     findings: List[Finding] = field(default_factory=list)
     files_reviewed: List[str] = field(default_factory=list)
     reviewer: str = "local-rules"
+    collaboration: Dict[str, Any] = field(default_factory=dict)
+    run_mode: Dict[str, Any] = field(default_factory=dict)
+    components: List[Dict[str, Any]] = field(default_factory=list)
+    execution: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +85,10 @@ class ReviewReport:
             "findings": [item.to_dict() for item in self.findings],
             "files_reviewed": self.files_reviewed,
             "reviewer": self.reviewer,
+            "collaboration": self.collaboration,
+            "run_mode": self.run_mode,
+            "components": self.components,
+            "execution": self.execution,
         }
 
 

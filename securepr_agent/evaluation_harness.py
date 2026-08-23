@@ -83,7 +83,7 @@ def validate_case(case: dict, line_number: int = 0) -> None:
     for field in ("id", "repository", "pull_request", "split", "diff", "expected_findings"):
         if field not in case:
             raise ValueError("%s is missing %s" % (prefix, field))
-    if case["split"] not in {"validation", "holdout"}:
+    if case["split"] not in {"train", "validation", "holdout"}:
         raise ValueError("%s has invalid split" % prefix)
     parsed = parse_unified_diff(str(case["diff"]))
     if not parsed.files or not parsed.added_lines:
@@ -300,7 +300,10 @@ class EndToEndEvaluationHarness:
         }
 
     def _run_case(self, reviewer: Reviewer, case: dict) -> Dict[str, Any]:
-        expected = list(case["expected_findings"])
+        expected = [
+            item for item in case["expected_findings"]
+            if bool(item.get("should_comment", True))
+        ]
         result = {
             "id": case["id"],
             "repository": case["repository"],
@@ -327,7 +330,11 @@ class EndToEndEvaluationHarness:
         }
         try:
             parsed = parse_unified_diff(case["diff"])
-            findings = reviewer.review(case["diff"], parsed)
+            review_case = getattr(reviewer, "review_case", None)
+            findings = (
+                review_case(case, parsed)
+                if review_case else reviewer.review(case["diff"], parsed)
+            )
             matches = one_to_one_match(expected, findings, self.line_tolerance)
             result["predicted"] = len(findings)
             result["tp"] = len(matches)

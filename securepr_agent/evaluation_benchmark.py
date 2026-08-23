@@ -3,15 +3,19 @@ import difflib
 import re
 from typing import Dict, List, Tuple
 
-from .agents import MultiAgentCoordinator
 from .diff_parser import ParsedDiff, parse_unified_diff
 from .evaluation_harness import RULE_TO_CWE
 from .models import Finding, Severity
-from .reviewer import LocalRuleReviewer, Reviewer
+from .reviewer import Reviewer
 
 
 class ContextRuleReviewer(Reviewer):
-    """Additional specialist used to demonstrate candidate-vs-baseline replay."""
+    """Supplemental deterministic rules used by the controlled benchmark.
+
+    The historical class name is kept for compatibility.  These rules inspect
+    individual added lines, so the evaluation must not attribute their extra
+    coverage to multi-agent orchestration or to cross-file context reasoning.
+    """
 
     name = "context-security-reliability-agent"
     RULES = [
@@ -37,7 +41,7 @@ class ContextRuleReviewer(Reviewer):
                 findings.append(Finding(
                     rule_id=rule_id,
                     severity=severity,
-                    title="Context-sensitive benchmark finding",
+                    title="Supplemental benchmark finding",
                     explanation=(
                         "The changed line matches a context-sensitive security or reliability "
                         "risk that requires evidence review."
@@ -50,14 +54,6 @@ class ContextRuleReviewer(Reviewer):
                     confidence=0.86,
                 ))
         return findings
-
-
-def baseline_reviewer() -> Reviewer:
-    return LocalRuleReviewer()
-
-
-def candidate_reviewer() -> Reviewer:
-    return MultiAgentCoordinator([LocalRuleReviewer(), ContextRuleReviewer()])
 
 
 def _risk_scenarios() -> List[dict]:
@@ -79,7 +75,7 @@ def _risk_scenarios() -> List[dict]:
                 "auto_fixable": repairable,
             })
 
-    # 19 high/critical cases: baseline finds 16, candidate finds another 2.
+    # 19 high/critical cases: legacy rules find 16; supplemental rules find 2 more.
     add("SEC-EVAL", "critical", "result = eval(value)", r"\beval\s*\(", r"json\.loads", 4)
     add(
         "SEC-SUBPROCESS-SHELL", "high",
@@ -110,7 +106,7 @@ def _risk_scenarios() -> List[dict]:
         r"pickle\.loads", r"json\.loads", 1, False,
     )
 
-    # 21 medium/low cases: baseline finds 9, candidate another 6, seven remain missed.
+    # 21 medium/low cases: legacy rules find 9; supplemental rules find another 6.
     add(
         "REL-EMPTY-EXCEPT", "medium", "except Exception:",
         r"except Exception:", r"except ValueError:", 5,
@@ -301,7 +297,7 @@ def generate_controlled_pr_cases() -> List[dict]:
                 "split": split,
                 "source": {
                     "kind": "synthetic-controlled",
-            "generator": "securepr-e2e-v1",
+                    "generator": "securepr_agent-e2e-v1",
                     "public_url": None,
                 },
                 "diff": item["diff"],

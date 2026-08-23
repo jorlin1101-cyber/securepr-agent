@@ -1,6 +1,48 @@
 import os
+import re
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Iterable, Optional
+
+
+_DOTENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def load_dotenv(paths: Optional[Iterable[str]] = None) -> None:
+    """Load local dotenv files without overriding real process environment values.
+
+    The project-root file has priority over ``securepr_agent/.env``.  This allows the
+    latter to remain compatible with existing local setups while keeping the
+    conventional root-level ``.env`` as the recommended location.
+    """
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(package_dir)
+    candidates = list(paths) if paths is not None else [
+        os.path.join(project_root, ".env"),
+        os.path.join(package_dir, ".env"),
+    ]
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                lines = handle.readlines()
+        except OSError:
+            continue
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            if "=" not in line:
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            if not _DOTENV_KEY.fullmatch(key):
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+
+
+load_dotenv()
 
 
 def _int(name: str, default: int) -> int:
@@ -38,6 +80,9 @@ class Settings:
     database_url: str = ""
     redis_url: str = ""
     async_workers: int = 2
+    memory_enabled: bool = True
+    memory_recall_limit: int = 6
+    memory_working_ttl_seconds: int = 86400
     skills_dir: str = "skills"
     github_app_id: str = ""
     github_app_slug: str = ""
@@ -62,11 +107,6 @@ class Settings:
     webhook_max_age_seconds: int = 600
     queue_max_attempts: int = 3
     queue_lease_seconds: int = 60
-    skill_timeout_seconds: int = 30
-    skill_memory_mb: int = 256
-    skill_sandbox: bool = True
-    skill_signing_key: str = ""
-    skill_container_image: str = ""
     repair_test_command: str = ""
     repair_verify_timeout_seconds: int = 120
     otel_endpoint: str = ""
@@ -78,6 +118,20 @@ class Settings:
     alert_smtp_host: str = ""
     alert_email_to: str = ""
     continuous_eval_seconds: int = 0
+    agent_token_budget: int = 8000
+    agent_time_budget_seconds: int = 60
+    agent_context_window_tokens: int = 32768
+    agent_context_input_tokens: int = 20000
+    context_diff_token_budget: int = 12000
+    context_observation_token_budget: int = 4000
+    context_recent_observations: int = 2
+    context_map_chunk_tokens: int = 3000
+    enabled_agents: str = "lead,security,correctness-reliability,critic"
+    llm_input_cost_per_million: float = 0.0
+    llm_output_cost_per_million: float = 0.0
+    evaluation_min_public_prs: int = 300
+    evaluation_min_f1_improvement: float = 0.03
+    evaluation_min_high_risk_improvement: float = 0.05
 
     def resolved_llm(self) -> Dict[str, object]:
         """Resolve a named provider to the existing OpenAI-compatible transport."""
@@ -166,6 +220,10 @@ class Settings:
             raise ValueError("bootstrap admin username and password must be configured together")
         if not 0.0 <= self.alert_failure_rate <= 1.0:
             raise ValueError("SECUREPR_ALERT_FAILURE_RATE must be between 0 and 1")
+        if self.llm_input_cost_per_million < 0 or self.llm_output_cost_per_million < 0:
+            raise ValueError("LLM token prices cannot be negative")
+        if self.evaluation_min_public_prs < 300:
+            raise ValueError("SECUREPR_EVALUATION_MIN_PUBLIC_PRS must be at least 300")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -185,6 +243,11 @@ class Settings:
             database_url=os.getenv("SECUREPR_DATABASE_URL", ""),
             redis_url=os.getenv("SECUREPR_REDIS_URL", ""),
             async_workers=_int("SECUREPR_ASYNC_WORKERS", 2),
+            memory_enabled=_bool("SECUREPR_MEMORY_ENABLED", True),
+            memory_recall_limit=_int("SECUREPR_MEMORY_RECALL_LIMIT", 6),
+            memory_working_ttl_seconds=_int(
+                "SECUREPR_MEMORY_WORKING_TTL_SECONDS", 86400
+            ),
             skills_dir=os.getenv("SECUREPR_SKILLS_DIR", "skills"),
             github_app_id=os.getenv("SECUREPR_GITHUB_APP_ID", ""),
             github_app_slug=os.getenv("SECUREPR_GITHUB_APP_SLUG", ""),
@@ -211,11 +274,6 @@ class Settings:
             webhook_max_age_seconds=_int("SECUREPR_WEBHOOK_MAX_AGE_SECONDS", 600),
             queue_max_attempts=_int("SECUREPR_QUEUE_MAX_ATTEMPTS", 3),
             queue_lease_seconds=_int("SECUREPR_QUEUE_LEASE_SECONDS", 60),
-            skill_timeout_seconds=_int("SECUREPR_SKILL_TIMEOUT_SECONDS", 30),
-            skill_memory_mb=_int("SECUREPR_SKILL_MEMORY_MB", 256),
-            skill_sandbox=_bool("SECUREPR_SKILL_SANDBOX", True),
-            skill_signing_key=os.getenv("SECUREPR_SKILL_SIGNING_KEY", ""),
-            skill_container_image=os.getenv("SECUREPR_SKILL_CONTAINER_IMAGE", ""),
             repair_test_command=os.getenv("SECUREPR_REPAIR_TEST_COMMAND", ""),
             repair_verify_timeout_seconds=_int("SECUREPR_REPAIR_VERIFY_TIMEOUT_SECONDS", 120),
             otel_endpoint=os.getenv("SECUREPR_OTEL_ENDPOINT", ""),
@@ -228,5 +286,44 @@ class Settings:
             alert_email_to=os.getenv("SECUREPR_ALERT_EMAIL_TO", ""),
             continuous_eval_seconds=_non_negative_int(
                 "SECUREPR_CONTINUOUS_EVAL_SECONDS", 0
+            ),
+            agent_token_budget=_int("SECUREPR_AGENT_TOKEN_BUDGET", 8000),
+            agent_time_budget_seconds=_int("SECUREPR_AGENT_TIME_BUDGET_SECONDS", 60),
+            agent_context_window_tokens=_int(
+                "SECUREPR_AGENT_CONTEXT_WINDOW_TOKENS", 32768
+            ),
+            agent_context_input_tokens=_int(
+                "SECUREPR_AGENT_CONTEXT_INPUT_TOKENS", 20000
+            ),
+            context_diff_token_budget=_int(
+                "SECUREPR_CONTEXT_DIFF_TOKEN_BUDGET", 12000
+            ),
+            context_observation_token_budget=_int(
+                "SECUREPR_CONTEXT_OBSERVATION_TOKEN_BUDGET", 4000
+            ),
+            context_recent_observations=_non_negative_int(
+                "SECUREPR_CONTEXT_RECENT_OBSERVATIONS", 2
+            ),
+            context_map_chunk_tokens=_int(
+                "SECUREPR_CONTEXT_MAP_CHUNK_TOKENS", 3000
+            ),
+            enabled_agents=os.getenv(
+                "SECUREPR_ENABLED_AGENTS",
+                "lead,security,correctness-reliability,critic",
+            ),
+            llm_input_cost_per_million=float(
+                os.getenv("SECUREPR_LLM_INPUT_COST_PER_MILLION", "0")
+            ),
+            llm_output_cost_per_million=float(
+                os.getenv("SECUREPR_LLM_OUTPUT_COST_PER_MILLION", "0")
+            ),
+            evaluation_min_public_prs=_int(
+                "SECUREPR_EVALUATION_MIN_PUBLIC_PRS", 300
+            ),
+            evaluation_min_f1_improvement=float(
+                os.getenv("SECUREPR_EVALUATION_MIN_F1_IMPROVEMENT", "0.03")
+            ),
+            evaluation_min_high_risk_improvement=float(
+                os.getenv("SECUREPR_EVALUATION_MIN_HIGH_RISK_IMPROVEMENT", "0.05")
             ),
         )

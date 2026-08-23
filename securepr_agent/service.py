@@ -2,20 +2,29 @@ import hashlib
 import uuid
 from typing import Any, Dict, Optional
 
-from .agents import FilteredAgent, MultiAgentCoordinator
+from .agentic_core import ModeRouterReviewer
 from .auth import AuthManager
 from .config import Settings
+from .context_manager import ContextManager
 from .evolution import EvolutionEngine
-from .fixer import SafeFixer
+from .evolution_v2 import RootCauseEvolutionGenerator
+from .patching import SuggestionOnlyFixer, VerifiedPatchFixer
 from .github import GitHubAppAuthenticator, GitHubClient
 from .harness import ReviewHarness
 from .metrics import metrics
+from .llm import JsonChatClient
+from .modes import RunMode
+from .memory import MemoryManager
+from .models import TaskState, TraceEvent
 from .observability import AlertManager, Observability
 from .postgres_store import create_store
 from .report import to_markdown
-from .reviewer import LocalRuleReviewer, OpenAICompatibleReviewer
-from .diff_parser import parse_unified_diff
-from .skills import SkillRegistry
+from .reviewer import (
+    OpenAICompatibleReviewer, ReliabilityRuleReviewer, SecurityRuleReviewer,
+)
+from .skills import AgentSkill, SkillRegistry
+from .skill_evolution import AgentSkillReplayReviewer, SkillEvolutionEngine, validate_artifact
+from .store import utc_now
 from .task_queue import PermanentTaskError, TaskQueue
 from .rollout import ReleaseManager
 from .verifier import RepairVerifier
@@ -27,19 +36,26 @@ class ReviewService:
         settings.validate_evolution()
         self.llm_config = settings.resolved_llm()
         self.store = create_store(settings.database_url, settings.db_path)
-        self.observability = Observability(settings.otel_service_name, settings.otel_endpoint)
-        self.registry = SkillRegistry(
-            settings.skills_dir, settings.skill_sandbox, settings.skill_timeout_seconds,
-            settings.skill_memory_mb, settings.skill_signing_key,
-            settings.skill_container_image,
+        self.memory = MemoryManager(
+            self.store, settings.memory_enabled, settings.memory_recall_limit,
+            settings.memory_working_ttl_seconds,
         )
-        local = LocalRuleReviewer()
+        self.context_manager = ContextManager(
+            settings.agent_context_window_tokens,
+            settings.agent_context_input_tokens,
+            settings.context_diff_token_budget,
+            settings.context_observation_token_budget,
+            settings.context_recent_observations,
+            settings.context_map_chunk_tokens,
+        )
+        self.observability = Observability(settings.otel_service_name, settings.otel_endpoint)
+        self.registry = SkillRegistry(settings.skills_dir)
         self.registry.register(
-            "security-review", FilteredAgent("security-agent", local, ("SEC-",)),
+            "security-review", SecurityRuleReviewer(),
             "1.0.0", "Security, injection and secret detection",
         )
         self.registry.register(
-            "reliability-review", FilteredAgent("reliability-agent", local, ("REL-",)),
+            "reliability-review", ReliabilityRuleReviewer(),
             "1.0.0", "Reliability and observability review",
         )
         if self.llm_config:
@@ -50,16 +66,26 @@ class ReviewService:
                 "1.0.0", "Context-aware AI code review via %s" % self.llm_config["provider"],
             )
         self.registry.reload()
-        coordinator = MultiAgentCoordinator(self.registry.reviewers(), store=self.store)
-        self.reviewer = coordinator
+        self.chat_client = (
+            JsonChatClient(
+                str(self.llm_config["base_url"]), str(self.llm_config["api_key"]),
+                str(self.llm_config["model"]), str(self.llm_config["provider"]),
+                settings.timeout_seconds, dict(self.llm_config.get("headers") or {}),
+            ) if self.llm_config else None
+        )
+        self.reviewer = self._build_mode_router()
         self.harness = ReviewHarness(
             self.store, self.reviewer, settings.max_steps, settings.timeout_seconds,
             observability=self.observability,
         )
         self.github = GitHubClient(settings.github_token)
-        self.fixer = SafeFixer(RepairVerifier(
+        repair_verifier = RepairVerifier(
             settings.repair_test_command, settings.repair_verify_timeout_seconds
-        ))
+        )
+        self.fixer = (
+            VerifiedPatchFixer(self.chat_client, repair_verifier)
+            if self.chat_client else SuggestionOnlyFixer()
+        )
         self.auth = AuthManager(
             self.store, settings.auth_secret, settings.session_ttl_seconds,
             settings.bootstrap_admin_username, settings.bootstrap_admin_password,
@@ -72,6 +98,23 @@ class ReviewService:
         self.evolution = EvolutionEngine(
             self.store,
             reviewer_factory=self._build_llm_reviewer if self.llm_config else None,
+            min_cases=settings.eval_min_cases,
+            max_cases=settings.eval_max_cases,
+            min_improvement=settings.eval_min_improvement,
+            min_holdout_cases=settings.eval_min_holdout_cases,
+            max_metric_regression=settings.eval_max_metric_regression,
+            candidate_generator=(
+                RootCauseEvolutionGenerator(self.chat_client)
+                if self.chat_client else None
+            ),
+        )
+        self.skill_evolution = SkillEvolutionEngine(
+            self.store,
+            reviewer_factory=(lambda artifact: AgentSkillReplayReviewer(
+                    artifact, self.chat_client,
+                    settings.agent_token_budget,
+                    settings.agent_time_budget_seconds,
+                )) if self.chat_client else None,
             min_cases=settings.eval_min_cases,
             max_cases=settings.eval_max_cases,
             min_improvement=settings.eval_min_improvement,
@@ -97,89 +140,52 @@ class ReviewService:
             extra_headers=dict(self.llm_config.get("headers") or {}),
         )
 
-    def _candidate_reviewer(self, tenant_id: str):
-        if not self.llm_config:
-            return None
-        deployment = self.store.get_deployment(tenant_id, "llm-review")
-        if not deployment or deployment.get("candidate_version") is None:
-            return None
-        versions = self.store.list_skill_versions("llm-review")
-        candidate = next(
-            (item for item in versions
-             if int(item["version"]) == int(deployment["candidate_version"])), None
+    def _build_mode_router(self) -> ModeRouterReviewer:
+        enabled = {
+            item.strip() for item in self.settings.enabled_agents.split(",") if item.strip()
+        }
+        unknown = enabled.difference({
+            "lead", "security", "correctness-reliability", "critic"
+        })
+        if unknown:
+            raise ValueError("unsupported enabled Agent role(s): %s" % ", ".join(sorted(unknown)))
+        active_prompt = self.store.get_active_skill_version("llm-review")
+        structured_config = {}
+        if active_prompt:
+            run = next((
+                item for item in self.store.list_evolution_runs(200)
+                if int(item.get("candidate_version") or 0) == int(active_prompt["version"])
+                and (item.get("metrics") or {}).get("structured_candidate")
+            ), None)
+            if run:
+                structured_config = (
+                    run["metrics"]["structured_candidate"].get("candidate") or {}
+                )
+        return ModeRouterReviewer(
+            self.store, self.chat_client,
+            self.settings.agent_token_budget,
+            self.settings.agent_time_budget_seconds,
+            self.settings.llm_input_cost_per_million,
+            self.settings.llm_output_cost_per_million,
+            enabled,
+            [
+                item for item in self.registry.reviewers()
+                if not isinstance(item, OpenAICompatibleReviewer)
+            ],
+            None,
+            self.settings.repair_test_command,
+            active_prompt["prompt"] if active_prompt else "",
+            structured_config,
+            self.memory,
+            self.context_manager,
+            self._active_agent_skills,
         )
-        return self._build_llm_reviewer(candidate["prompt"]) if candidate else None
 
     def _run_review(
         self, task_id: str, repository: str, pull_request: Optional[int],
         diff: str, tenant_id: str,
     ):
-        task = self.store.get(task_id, tenant_id) or {}
-        deployment = self.store.get_deployment(tenant_id, "llm-review")
-        if (
-            (task.get("input") or {}).get("release_lane") == "canary"
-            or (deployment and deployment.get("status") == "promoted")
-        ):
-            candidate = self._candidate_reviewer(tenant_id)
-            if candidate:
-                canary_reviewer = MultiAgentCoordinator([
-                    item for item in self.registry.reviewers()
-                    if not isinstance(item, OpenAICompatibleReviewer)
-                ] + [candidate], store=self.store)
-                harness = ReviewHarness(
-                    self.store, canary_reviewer, self.settings.max_steps,
-                    self.settings.timeout_seconds, observability=self.observability,
-                )
-                return harness.run(task_id, repository, pull_request, diff)
-        return self.harness.run(task_id, repository, pull_request, diff)
-
-    def _run_shadow(
-        self, task_id: str, tenant_id: str, diff: str, primary_report,
-    ) -> None:
-        task = self.store.get(task_id, tenant_id) or {}
-        if not (task.get("input") or {}).get("shadow"):
-            return
-        candidate = self._candidate_reviewer(tenant_id)
-        if not candidate:
-            self.store.audit(
-                tenant_id, "system", "shadow.skipped", task_id,
-                {"reason": "candidate reviewer is unavailable"},
-            )
-            return
-        lane = (task.get("input") or {}).get("release_lane", "stable")
-        primary = {
-            "risk": primary_report.risk,
-            "finding_keys": sorted(
-                "%s:%s:%s" % (item.path, item.line, item.rule_id)
-                for item in primary_report.findings
-            ),
-        }
-        try:
-            parsed = parse_unified_diff(diff)
-            findings = candidate.review(diff, parsed)
-            candidate_result = {
-                "finding_keys": sorted(
-                    "%s:%s:%s" % (item.path, item.line, item.rule_id)
-                    for item in findings
-                )
-            }
-            rollout = self.releases.observe_shadow(
-                tenant_id, "llm-review", task_id, lane, primary, candidate_result
-            )
-            self.store.audit(
-                tenant_id, "system", "shadow.completed", task_id,
-                {"findings": len(findings), "candidate_output_used": False,
-                 "rollout_status": (rollout or {}).get("status")},
-            )
-            metrics.inc("shadow_reviews_total")
-        except Exception as exc:
-            self.releases.observe_shadow(
-                tenant_id, "llm-review", task_id, lane, primary, None, True
-            )
-            self.store.audit(
-                tenant_id, "system", "shadow.failed", task_id, {"error": str(exc)[:500]}
-            )
-            metrics.inc("shadow_reviews_failed_total")
+        return self.harness.run(task_id, repository, pull_request, diff, tenant_id)
 
     def reload_skills(self) -> list:
         if self.llm_config:
@@ -189,13 +195,34 @@ class ReviewService:
                 self._build_llm_reviewer(active["prompt"] if active else ""),
                 "1.0.0", "Context-aware AI code review via %s" % self.llm_config["provider"],
             )
-        skills = self.registry.reload()
-        self.reviewer = MultiAgentCoordinator(self.registry.reviewers(), store=self.store)
+        self.registry.reload()
+        skills = self.registry.list()
+        self.reviewer = self._build_mode_router()
         self.harness = ReviewHarness(
             self.store, self.reviewer, self.settings.max_steps, self.settings.timeout_seconds,
             observability=self.observability,
         )
         return skills
+
+    def _active_agent_skills(self, tenant_id: str) -> list:
+        values = {skill.name: skill for skill in self.registry.agent_skills()}
+        for version in self.store.list_active_skill_artifacts(tenant_id):
+            artifact = validate_artifact(version["artifact"], version["skill_name"])
+            values[version["skill_name"]] = AgentSkill.from_artifact(
+                artifact, str(version["version"])
+            )
+        return [values[name] for name in sorted(values)]
+
+    def list_skills(self, tenant_id: str) -> list:
+        scanners = [item for item in self.registry.list() if item.get("kind") == "scanner"]
+        return scanners + [{
+            "name": skill.name, "version": skill.version,
+            "description": skill.description, "source": skill.source,
+            "kind": "agent-skill", "sandboxed": False,
+            "permissions": list(skill.allowed_tools),
+            "content_sha256": skill.content_sha256,
+            "resources": list(skill.resource_paths),
+        } for skill in self._active_agent_skills(tenant_id)]
 
     def _validate_review(self, repository: str, diff: str) -> None:
         if not repository or len(repository) > 250:
@@ -206,9 +233,15 @@ class ReviewService:
         if size > self.settings.max_diff_bytes:
             raise ValueError("diff exceeds maximum size of %d bytes" % self.settings.max_diff_bytes)
 
+    def _require_agentic_model(self) -> None:
+        if self.chat_client is None:
+            raise RuntimeError("agentic review requires a configured model")
+
     def _create_task(
         self, repository: str, diff: str, pull_request: Optional[int], source: str,
-        tenant_id: str = "default",
+        tenant_id: str = "default", repository_root: str = "",
+        enabled_agents: Optional[list] = None,
+        enabled_skills: Optional[list] = None,
     ) -> str:
         task_id = str(uuid.uuid4())
         encoded = diff.encode("utf-8")
@@ -216,6 +249,10 @@ class ReviewService:
         self.store.create(task_id, repository, pull_request, {
             "source": source, "diff_bytes": len(encoded), "diff_sha256": hashlib.sha256(encoded).hexdigest(),
             "release_lane": assignment["lane"], "shadow": assignment["shadow"],
+            "mode": RunMode.AGENTIC.value,
+            "repository_root": repository_root,
+            "enabled_agents": enabled_agents or [],
+            "enabled_skills": enabled_skills or [],
         }, tenant_id)
         self.store.save_task_payload(task_id, diff)
         return task_id
@@ -230,16 +267,27 @@ class ReviewService:
             "source": source, "diff_pending": True,
             "release_lane": assignment["lane"], "shadow": assignment["shadow"],
             **payload,
+            "mode": RunMode.AGENTIC.value,
         }, tenant_id)
         return task_id
 
     def create_review(
         self, repository: str, diff: str, pull_request: Optional[int] = None,
-        source: str = "api", tenant_id: str = "default",
+        source: str = "api", tenant_id: str = "default", mode: str = "",
+        repository_root: str = "", enabled_agents: Optional[list] = None,
+        enabled_skills: Optional[list] = None,
     ) -> Dict[str, Any]:
         self._validate_review(repository, diff)
+        RunMode.parse(mode) if mode else None
+        self._require_agentic_model()
+        self._validate_repository_root(repository_root)
+        self._validate_enabled_agents(enabled_agents)
+        self._validate_enabled_skills(enabled_skills, tenant_id)
         self._authorize_repository(tenant_id, repository)
-        task_id = self._create_task(repository, diff, pull_request, source, tenant_id)
+        task_id = self._create_task(
+            repository, diff, pull_request, source, tenant_id,
+            repository_root, enabled_agents, enabled_skills,
+        )
         try:
             with self.observability.span(
                 "review", task_id, task_id=task_id, tenant_id=tenant_id,
@@ -248,7 +296,6 @@ class ReviewService:
                 report = self._run_review(
                     task_id, repository, pull_request, diff, tenant_id
                 )
-            self._run_shadow(task_id, tenant_id, diff, report)
             metrics.inc("reviews_total")
             lane = (self.store.get(task_id, tenant_id).get("input") or {}).get(
                 "release_lane", "stable"
@@ -265,11 +312,21 @@ class ReviewService:
     def enqueue_review(
         self, repository: str, diff: str, pull_request: Optional[int] = None,
         source: str = "api", github_issue_url: str = "", installation_id: Optional[int] = None,
-        tenant_id: str = "default",
+        tenant_id: str = "default", mode: str = "", repository_root: str = "",
+        enabled_agents: Optional[list] = None,
+        enabled_skills: Optional[list] = None,
     ) -> Dict[str, Any]:
         self._validate_review(repository, diff)
+        RunMode.parse(mode) if mode else None
+        self._require_agentic_model()
+        self._validate_repository_root(repository_root)
+        self._validate_enabled_agents(enabled_agents)
+        self._validate_enabled_skills(enabled_skills, tenant_id)
         self._authorize_repository(tenant_id, repository)
-        task_id = self._create_task(repository, diff, pull_request, source, tenant_id)
+        task_id = self._create_task(
+            repository, diff, pull_request, source, tenant_id,
+            repository_root, enabled_agents, enabled_skills,
+        )
         self.queue.submit({
             "task_id": task_id, "repository": repository, "pull_request": pull_request,
             "github_issue_url": github_issue_url, "installation_id": installation_id,
@@ -309,7 +366,6 @@ class ReviewService:
                     task_id, payload["repository"], payload.get("pull_request"), diff,
                     tenant_id,
                 )
-            self._run_shadow(task_id, tenant_id, diff, report)
             metrics.inc("reviews_total")
             lane = (task.get("input") or {}).get("release_lane", "stable")
             self.releases.observe(tenant_id, "llm-review", False, lane)
@@ -317,7 +373,7 @@ class ReviewService:
                 client = self.github_client_for_installation(payload.get("installation_id"))
                 client.upsert_comment(
                     payload["github_issue_url"], to_markdown(report.to_dict()),
-                    "<!-- securepr-review:%s -->" % task_id,
+                    "<!-- securepr_agent-review:%s -->" % task_id,
                 )
         except Exception:
             metrics.inc("reviews_failed_total")
@@ -329,6 +385,20 @@ class ReviewService:
     def _on_dead_letter(self, payload: Dict[str, Any], error: str) -> None:
         task_id = payload.get("task_id", "")
         tenant_id = payload.get("tenant_id", "default")
+        task = self.store.get(task_id, tenant_id) if task_id else None
+        if task and task.get("state") not in {
+            TaskState.SUCCESS.value, TaskState.FAILED.value, TaskState.CANCELLED.value,
+        }:
+            step = max(
+                [int(item.get("step", 0)) for item in task.get("trace", [])] or [0]
+            ) + 1
+            self.store.fail(
+                task_id, error,
+                TraceEvent(
+                    step, TaskState.FAILED,
+                    "Task entered the dead-letter queue: %s" % error, utc_now(),
+                ),
+            )
         self.store.create_alert(
             tenant_id, "dlq:%s" % (task_id or "unknown"), "critical",
             "Task %s entered the dead-letter queue: %s" % (task_id, error),
@@ -355,6 +425,7 @@ class ReviewService:
         if action not in {"opened", "reopened", "synchronize"}:
             self.store.complete_webhook(delivery_id, None)
             return {"ignored": True, "reason": "unsupported pull_request action: %s" % action}
+        self._require_agentic_model()
         pull = payload.get("pull_request") or {}
         repository = (payload.get("repository") or {}).get("full_name", "")
         number = payload.get("number")
@@ -411,11 +482,18 @@ class ReviewService:
         self, task_id: str, category: str, finding: Optional[dict], note: str,
         tenant_id: Optional[str] = None,
     ) -> dict:
-        if not self.store.get(task_id, tenant_id):
+        task = self.store.get(task_id, tenant_id)
+        if not task:
             raise ValueError("task not found")
+        if task.get("state") != "SUCCESS" or not task.get("report"):
+            raise ValueError("feedback requires a completed review task")
         if category not in {"false_positive", "missed_issue", "bad_fix", "accepted"}:
             raise ValueError("unsupported feedback category")
         self.store.record_failure_case(task_id, category, {"finding": finding, "note": note[:2000]})
+        self.memory.remember_feedback(
+            task.get("tenant_id") or tenant_id or "default", task["repository"],
+            task_id, category, finding, note[:2000],
+        )
         metrics.inc("feedback_total")
         return {"recorded": True, "category": category}
 
@@ -441,3 +519,34 @@ class ReviewService:
     def _authorize_repository(self, tenant_id: str, repository: str) -> None:
         if not self.store.repository_allowed(tenant_id, repository):
             raise PermissionError("repository is not authorized for this tenant")
+
+    @staticmethod
+    def _validate_repository_root(repository_root: str) -> None:
+        if not repository_root:
+            return
+        import os
+        if not os.path.isabs(repository_root) or not os.path.isdir(repository_root):
+            raise ValueError("repository_root must be an existing absolute directory")
+
+    @staticmethod
+    def _validate_enabled_agents(enabled_agents: Optional[list]) -> None:
+        if enabled_agents is None:
+            return
+        allowed = {"lead", "security", "correctness-reliability", "critic"}
+        unknown = set(enabled_agents).difference(allowed)
+        if unknown:
+            raise ValueError("unsupported enabled Agent role(s): %s" % ", ".join(sorted(unknown)))
+
+    def _validate_enabled_skills(
+        self, enabled_skills: Optional[list], tenant_id: str,
+    ) -> None:
+        if enabled_skills is None:
+            return
+        if not all(isinstance(item, str) for item in enabled_skills):
+            raise ValueError("enabled_skills must contain Agent Skill names")
+        available = {skill.name for skill in self._active_agent_skills(tenant_id)}
+        unknown = set(enabled_skills).difference(available)
+        if unknown:
+            raise ValueError(
+                "unknown enabled Agent Skill(s): %s" % ", ".join(sorted(unknown))
+            )

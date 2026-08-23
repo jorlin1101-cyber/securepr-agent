@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import io
+import tokenize
 from io import BytesIO
 from typing import Dict
 
@@ -22,10 +24,17 @@ class RepairVerifier:
                 try:
                     compile(content, path, "exec")
                     checks.append({"name": "compile:%s" % path, "passed": True})
+                    list(tokenize.generate_tokens(io.StringIO(content).readline))
+                    checks.append({"name": "cst-tokenize:%s" % path, "passed": True})
                 except SyntaxError as exc:
                     checks.append({
                         "name": "compile:%s" % path, "passed": False,
                         "detail": "%s:%s: %s" % (path, exc.lineno, exc.msg),
+                    })
+                except (tokenize.TokenError, IndentationError) as exc:
+                    checks.append({
+                        "name": "cst-tokenize:%s" % path, "passed": False,
+                        "detail": str(exc)[:1000],
                     })
         return {
             "passed": all(item["passed"] for item in checks),
@@ -45,7 +54,7 @@ class RepairVerifier:
             key: value for key, value in os.environ.items()
             if key in {"PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "TMP", "TEMP"}
         }
-        with tempfile.TemporaryDirectory(prefix="securepr-verify-") as temp:
+        with tempfile.TemporaryDirectory(prefix="securepr_agent-verify-") as temp:
             env["TMPDIR"] = temp
             try:
                 result = subprocess.run(
@@ -65,7 +74,7 @@ class RepairVerifier:
 
     def verify_archive(self, archive: bytes, files: Dict[str, str]) -> dict:
         """Verify changed files inside an isolated copy of the complete repository."""
-        with tempfile.TemporaryDirectory(prefix="securepr-repair-") as root:
+        with tempfile.TemporaryDirectory(prefix="securepr_agent-repair-") as root:
             with zipfile.ZipFile(BytesIO(archive)) as bundle:
                 for member in bundle.infolist():
                     normalized = os.path.normpath(member.filename).replace("\\", "/")
@@ -97,3 +106,28 @@ class RepairVerifier:
                     + test_result.get("duration_seconds", 0), 4
                 ),
             }
+
+    @staticmethod
+    def compare(before: dict, after: dict) -> dict:
+        before_tests = [
+            item for item in before.get("checks", [])
+            if item.get("name") == "repository-tests"
+        ]
+        after_tests = [
+            item for item in after.get("checks", [])
+            if item.get("name") == "repository-tests"
+        ]
+        passed = bool(
+            before.get("passed") and after.get("passed")
+            and before_tests and after_tests
+            and all(item.get("passed") for item in after_tests)
+        )
+        return {
+            "passed": passed,
+            "baseline_passed": bool(before.get("passed")),
+            "patched_passed": bool(after.get("passed")),
+            "test_evidence_present": bool(before_tests and after_tests),
+            "behavioral_regression_detected": bool(
+                before.get("passed") and not after.get("passed")
+            ),
+        }

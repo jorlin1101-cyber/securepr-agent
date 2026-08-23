@@ -2,6 +2,22 @@
 
 All notable public changes to SecurePR Agent are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- A model-backed Agent Runtime with Lead, Security, Correctness/Reliability, and Critic roles.
+- Context budgeting, repository tools, isolated memory recall, execution ledgers, and finding gates.
+- Declarative `SKILL.md` Agent Skills with tenant-scoped evolution, replay evaluation, activation, and rollback.
+- Prompt-evolution proofs, real-PR evaluation gates, verified unified patches, and before/after test evidence.
+- Dashboard views for run mode, model usage, collaboration traces, task feedback, and Skill evolution.
+
+### Changed
+
+- Replaced LangGraph and executable Python review Skills with the built-in runtime and declarative Agent Skills.
+- Kept authentication secure by default and retained output sanitization and semantic finding deduplication.
+- SQLite connections now close reliably after each transaction, including on Windows.
+
 ## [0.3.0] - 2026-08-12
 
 ### Added

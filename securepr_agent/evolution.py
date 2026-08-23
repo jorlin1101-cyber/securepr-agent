@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import threading
 import uuid
 from typing import Any, Callable, Dict, List, Optional
@@ -198,12 +199,13 @@ class EvolutionEngine:
     """Prompt evolution backed by replay evaluation, audit records and activation gates."""
 
     FORBIDDEN = ("ignore previous", "disable safety", "bypass", "直接执行生产")
+    FEEDBACK_RULE_ID = re.compile(r"^[A-Z][A-Z0-9_-]{1,79}$")
 
     def __init__(
         self, store, reviewer_factory: Optional[Callable[[str], object]] = None,
         min_cases: int = 3, max_cases: int = 5, min_improvement: float = 0.01,
         min_holdout_cases: int = 0, max_metric_regression: float = 0.0,
-        seed_defaults: bool = True,
+        seed_defaults: bool = True, candidate_generator=None,
     ):
         self.store = store
         self.reviewer_factory = reviewer_factory
@@ -212,6 +214,7 @@ class EvolutionEngine:
         self.min_improvement = min_improvement
         self.min_holdout_cases = min_holdout_cases
         self.max_metric_regression = max_metric_regression
+        self.candidate_generator = candidate_generator
         self._lock = threading.RLock()
         if seed_defaults:
             self._seed_default_cases()
@@ -314,6 +317,7 @@ class EvolutionEngine:
 
     def _propose(
         self, skill_name: str, prompt: str, regression_score: Optional[float],
+        activation_policy: str = "auto",
     ) -> Dict[str, Any]:
         safety = self.safety_evaluate(prompt)
         active = self.store.get_active_skill_version(skill_name)
@@ -383,8 +387,12 @@ class EvolutionEngine:
                 "holdout_non_regression": holdout_safe,
             })
             if no_errors and improved and validation_safe and holdout_safe:
-                decision = "activated"
-                reason = "candidate improved on validation and passed the non-regression holdout gate"
+                decision = "activated" if activation_policy == "auto" else "shadow_ready"
+                reason = (
+                    "candidate improved on validation and passed the non-regression holdout gate"
+                    if decision == "activated" else
+                    "candidate passed replay gates and is awaiting shadow/canary approval"
+                )
             else:
                 decision = "rejected"
                 reasons = []
@@ -448,10 +456,53 @@ class EvolutionEngine:
         with self._lock:
             return self.store.activate_skill_version(skill_name, version)
 
-    def auto_propose(self, skill_name: str = "llm-review") -> Dict[str, Any]:
-        cases = self.store.list_failure_cases(True, 100)
+    def auto_propose(
+        self, skill_name: str = "llm-review", tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        cases = self.store.list_failure_cases(True, 100, tenant_id)
         active = self.store.get_active_skill_version(skill_name)
         base = active["prompt"] if active else DEFAULT_PROMPT
+        if self.candidate_generator is not None and cases:
+            generated = self.candidate_generator.generate(cases, base)
+            candidate = generated["candidate_prompt"]
+            if candidate.strip() == base.strip():
+                return {
+                    "version": None, "decision": "deferred",
+                    "reason": "root-cause analysis produced no prompt change",
+                    "candidate_change": generated,
+                    "failure_cases_used": len(cases), "run_id": None,
+                }
+            result = self._propose(skill_name, candidate, None, activation_policy="shadow")
+            result["candidate_change"] = generated
+            result["failure_cases_used"] = len(cases)
+            result["rollback_point"] = (
+                {"skill_name": skill_name, "version": active["version"]}
+                if active else None
+            )
+            result["evaluation_data"] = {
+                "validation_sha256": self.status()["validation_dataset_fingerprint"],
+                "holdout_sha256": self.status()["holdout_dataset_fingerprint"],
+            }
+            if result.get("run_id"):
+                runs = self.store.list_evolution_runs(200)
+                run = next((item for item in runs if item["id"] == result["run_id"]), None)
+                if run:
+                    metrics = dict(run["metrics"])
+                    metrics["structured_candidate"] = {
+                        "generator": generated["generator"],
+                        "failure_cases": generated["failure_cases"],
+                        "clusters": generated["clusters"],
+                        "change_diff": generated["change_diff"],
+                        "candidate": generated["candidate"],
+                        "generation_execution": generated["generation"],
+                        "evaluation_data": result["evaluation_data"],
+                        "rollback_point": result["rollback_point"],
+                        "source_code_changes_allowed": False,
+                    }
+                    self.store.update_evolution_run(
+                        result["run_id"], result["decision"], metrics
+                    )
+            return result
         counts = {}
         for case in cases:
             counts[case["category"]] = counts.get(case["category"], 0) + 1
@@ -464,6 +515,24 @@ class EvolutionEngine:
             directives.append("Propose minimal fixes that preserve behavior and always include a regression test.")
         if counts.get("execution_error"):
             directives.append("Keep output valid JSON and follow the requested schema exactly.")
+        # A missed-issue feedback item may carry the reviewer rule identifier that a
+        # human confirmed.  Preserve that signal in the prompt without accepting
+        # arbitrary feedback text as an instruction.  The bracketed marker is both
+        # human-readable to an LLM and machine-auditable in offline replay.
+        learned_rule_ids = sorted({
+            str((case.get("payload", {}).get("finding") or {}).get("rule_id", "")).strip()
+            for case in cases
+            if case.get("category") == "missed_issue"
+        })
+        learned_rule_ids = [
+            rule_id for rule_id in learned_rule_ids
+            if self.FEEDBACK_RULE_ID.fullmatch(rule_id)
+        ]
+        directives.extend(
+            "Explicitly check added lines for confirmed rule %s [focus-rule:%s]."
+            % (rule_id, rule_id)
+            for rule_id in learned_rule_ids
+        )
         additions = [directive for directive in directives if directive.lower() not in base.lower()]
         if not additions:
             return {
@@ -485,6 +554,7 @@ class EvolutionEngine:
         result = self.propose(skill_name, candidate)
         result["failure_cases_used"] = len(cases)
         result["learned_categories"] = counts
+        result["learned_rule_ids"] = learned_rule_ids
         if result["decision"] == "activated":
             self.store.resolve_failure_cases([case["id"] for case in cases])
         return result

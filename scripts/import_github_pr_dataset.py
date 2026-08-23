@@ -18,13 +18,14 @@ if ROOT not in sys.path:
 
 from securepr_agent.diff_parser import parse_unified_diff  # noqa: E402
 from securepr_agent.evaluation_harness import validate_case  # noqa: E402
+from securepr_agent.evaluation_v2 import validate_real_dataset  # noqa: E402
 
 
 def fetch_diff(repository, pull_request, token=""):
     url = "https://api.github.com/repos/%s/pulls/%d" % (repository, pull_request)
     headers = {
         "Accept": "application/vnd.github.v3.diff",
-    "User-Agent": "securepr-evaluation-importer",
+        "User-Agent": "securepr_agent-evaluation-importer",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     if token:
@@ -44,7 +45,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", help="Labelled JSONL manifest")
     parser.add_argument("output", help="Evaluation JSONL output")
-    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--limit", type=int, default=300)
     args = parser.parse_args()
     token = os.environ.get("GITHUB_TOKEN", "")
     records = []
@@ -56,6 +57,11 @@ def main():
             if "expected_findings" not in item:
                 raise ValueError(
                     "manifest line %d has no human-reviewed expected_findings"
+                    % line_number
+                )
+            if any("should_comment" not in finding for finding in item["expected_findings"]):
+                raise ValueError(
+                    "manifest line %d has a finding without human should_comment label"
                     % line_number
                 )
             diff, _api_url = fetch_diff(
@@ -90,6 +96,9 @@ def main():
         raise ValueError(
             "manifest produced %d records; %d required" % (len(records), args.limit)
         )
+    readiness = validate_real_dataset(records, args.limit)
+    if not readiness["ready"]:
+        raise ValueError("dataset failed production readiness gates: %s" % readiness["gates"])
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8", newline="\n") as handle:
         for record in records:

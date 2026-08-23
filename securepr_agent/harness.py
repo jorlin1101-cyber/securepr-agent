@@ -1,17 +1,13 @@
-"""Checkpointed review graph.
-
-LangGraph is used when installed. The same node functions have a small local
-executor so a developer checkout remains usable without optional dependencies.
-Checkpoints are owned by the application store and therefore work with either
-executor and survive worker restarts.
-"""
+"""Checkpointed review workflow powered by SecurePR Agent's own runtime."""
 import threading
-import time
 from typing import Any, Dict, Optional, TypedDict
 
 from .diff_parser import ParsedDiff, parse_unified_diff
 from .models import ChangedLine, Finding, ReviewReport, Severity, TaskState, TraceEvent
 from .reviewer import Reviewer
+from .runtime import (
+    AgentRuntime, RuntimeBudgetExceeded, RuntimeCancelled, RuntimeNode,
+)
 from .store import TaskStore, utc_now
 
 
@@ -27,18 +23,15 @@ class RuntimeState(TypedDict, total=False):
     task_id: str
     repository: str
     pull_request: Optional[int]
+    tenant_id: str
     diff: str
     parsed: Dict[str, Any]
     findings: list
     report: Dict[str, Any]
 
 
-class BudgetExceeded(RuntimeError):
-    pass
-
-
-class TaskCancelled(RuntimeError):
-    pass
+BudgetExceeded = RuntimeBudgetExceeded
+TaskCancelled = RuntimeCancelled
 
 
 class ReviewHarness:
@@ -54,37 +47,21 @@ class ReviewHarness:
         self.timeout_seconds = timeout_seconds
         self.node_retries = node_retries
         self.observability = observability
-        self.name = "langgraph"
+        self.name = "securepr_agent-runtime"
         self._ctx = threading.local()
-        self.graph = self._build_graph()
-
-    def _build_graph(self):
-        try:
-            from langgraph.graph import END, START, StateGraph
-            builder = StateGraph(RuntimeState)
-            builder.add_node("planning", self._planning)
-            builder.add_node("executing", self._executing)
-            builder.add_node("reviewing", self._reviewing)
-            builder.add_edge(START, "planning")
-            builder.add_edge("planning", "executing")
-            builder.add_edge("executing", "reviewing")
-            builder.add_edge("reviewing", END)
-            return builder.compile()
-        except ImportError:
-            self.name = "durable-graph-fallback"
-            return None
+        self.runtime = AgentRuntime(max_steps, timeout_seconds, node_retries)
 
     def run(
         self, task_id: str, repository: str, pull_request: Optional[int], diff: str,
+        tenant_id: str = "default",
     ) -> ReviewReport:
         task = self.store.get(task_id)
         if task and task.get("state") == TaskState.SUCCESS.value and task.get("report"):
             return self._report_from_dict(task["report"])
         state: RuntimeState = {
             "task_id": task_id, "repository": repository,
-            "pull_request": pull_request, "diff": diff,
+            "pull_request": pull_request, "diff": diff, "tenant_id": tenant_id,
         }
-        self._ctx.started = time.monotonic()
         self._ctx.step = max([item["step"] for item in (task or {}).get("trace", [])] or [0])
         self._ctx.task_id = task_id
         checkpoints = self.store.load_checkpoints(task_id)
@@ -96,12 +73,17 @@ class ReviewHarness:
         if checkpoints.get("reviewing", {}).get("status") == "completed":
             self._ctx.state = TaskState.REVIEWING
         try:
-            if self.graph is not None:
-                result = self.graph.invoke(state)
-            else:
-                result = state
-                for node in (self._planning, self._executing, self._reviewing):
-                    result.update(node(result))
+            result = self.runtime.execute(
+                state,
+                [
+                    RuntimeNode("planning", self._planning),
+                    RuntimeNode("executing", self._executing),
+                    RuntimeNode("reviewing", self._reviewing),
+                ],
+                task_id=task_id, checkpoint_store=self.store,
+                cancel_check=lambda: self.store.is_cancelled(task_id),
+                span_factory=self._span,
+            )
             report = self._report_from_dict(result["report"])
             self._ctx.step += 1
             self.store.succeed(
@@ -131,98 +113,62 @@ class ReviewHarness:
 
     def resume(
         self, task_id: str, repository: str, pull_request: Optional[int], diff: str,
+        tenant_id: str = "default",
     ) -> ReviewReport:
-        return self.run(task_id, repository, pull_request, diff)
+        return self.run(task_id, repository, pull_request, diff, tenant_id)
 
     def _planning(self, state: RuntimeState) -> Dict[str, Any]:
-        cached = self._completed(state["task_id"], "planning")
-        if cached is not None:
-            return cached
-
-        def work():
-            parsed = parse_unified_diff(state["diff"])
-            if not parsed.files and not parsed.added_lines:
-                raise ValueError("diff does not contain a valid unified diff with added lines")
-            self._transition(TaskState.PLANNING, "Input accepted; preparing review plan")
-            return {"parsed": self._serialize_parsed(parsed)}
-
-        return self._run_node(state["task_id"], "planning", work)
+        parsed = parse_unified_diff(state["diff"])
+        if not parsed.files and not parsed.added_lines:
+            raise ValueError("diff does not contain a valid unified diff with added lines")
+        self._transition(TaskState.PLANNING, "Input accepted; preparing review plan")
+        return {"parsed": self._serialize_parsed(parsed)}
 
     def _executing(self, state: RuntimeState) -> Dict[str, Any]:
-        cached = self._completed(state["task_id"], "executing")
-        if cached is not None:
-            return cached
-
-        def work():
-            parsed = self._deserialize_parsed(state["parsed"])
-            self._transition(
-                TaskState.EXECUTING, "Reviewing %d changed files" % len(parsed.files)
+        parsed = self._deserialize_parsed(state["parsed"])
+        self._transition(
+            TaskState.EXECUTING, "Reviewing %d changed files" % len(parsed.files)
+        )
+        contextual = getattr(self.reviewer, "review_with_context", None)
+        findings = (
+            contextual(
+                state["task_id"], state["diff"], parsed,
+                repository=state["repository"], tenant_id=state.get("tenant_id", "default"),
             )
-            contextual = getattr(self.reviewer, "review_with_context", None)
-            findings = (
-                contextual(state["task_id"], state["diff"], parsed)
-                if contextual else self.reviewer.review(state["diff"], parsed)
-            )
-            return {"findings": [item.to_dict() for item in findings]}
-
-        return self._run_node(state["task_id"], "executing", work)
+            if contextual else self.reviewer.review(state["diff"], parsed)
+        )
+        return {"findings": [item.to_dict() for item in findings]}
 
     def _reviewing(self, state: RuntimeState) -> Dict[str, Any]:
-        cached = self._completed(state["task_id"], "reviewing")
-        if cached is not None:
-            return cached
-
-        def work():
-            parsed = self._deserialize_parsed(state["parsed"])
-            findings = [self._finding_from_dict(item) for item in state["findings"]]
-            self._transition(
-                TaskState.REVIEWING, "Validating and ranking %d findings" % len(findings)
-            )
-            risk = self._risk(findings)
-            report = ReviewReport(
-                repository=state["repository"], pull_request=state.get("pull_request"),
-                summary=self._summary(findings, len(parsed.files), risk), risk=risk,
-                findings=findings, files_reviewed=parsed.files, reviewer=self.reviewer.name,
-            )
-            return {"report": report.to_dict()}
-
-        return self._run_node(state["task_id"], "reviewing", work)
-
-    def _run_node(self, task_id: str, node: str, callback) -> Dict[str, Any]:
-        last_error = None
-        existing = self.store.load_checkpoints(task_id).get(node, {})
-        start_attempt = int(existing.get("attempt", 0))
-        for offset in range(1, self.node_retries + 2):
-            attempt = start_attempt + offset
-            self._check_budget(task_id)
-            try:
-                if self.observability:
-                    with self.observability.span(
-                        "review.%s" % node, task_id, task_id=task_id,
-                        node=node, attempt=attempt,
-                    ):
-                        output = callback()
-                else:
-                    output = callback()
-                self.store.save_checkpoint(task_id, node, output, "completed", attempt)
-                return output
-            except (ValueError, TaskCancelled, BudgetExceeded):
-                raise
-            except Exception as exc:
-                last_error = exc
-                self.store.save_checkpoint(
-                    task_id, node, {}, "failed", attempt, str(exc)
-                )
-        raise last_error
-
-    def _completed(self, task_id: str, node: str) -> Optional[Dict[str, Any]]:
-        checkpoint = self.store.load_checkpoints(task_id).get(node)
-        if checkpoint and checkpoint["status"] == "completed":
-            return checkpoint["state"]
-        return None
+        parsed = self._deserialize_parsed(state["parsed"])
+        findings = [self._finding_from_dict(item) for item in state["findings"]]
+        self._transition(
+            TaskState.REVIEWING, "Validating and ranking %d findings" % len(findings)
+        )
+        risk = self._risk(findings)
+        summary_reader = getattr(self.reviewer, "collaboration_summary", None)
+        reviewer_summary = summary_reader(state["task_id"]) if summary_reader else {}
+        if reviewer_summary and "run_mode" in reviewer_summary:
+            collaboration = dict(reviewer_summary.get("collaboration") or {})
+            run_mode = dict(reviewer_summary.get("run_mode") or {})
+            components = list(reviewer_summary.get("components") or [])
+            execution = dict(reviewer_summary.get("execution") or {})
+            execution["gates"] = reviewer_summary.get("gates") or {}
+            execution["rejected_findings"] = reviewer_summary.get("rejected_findings") or []
+            execution["repository_context"] = reviewer_summary.get("repository_context") or {}
+        else:
+            collaboration = reviewer_summary or self._persisted_collaboration_summary(state["task_id"])
+            run_mode, components, execution = {}, [], {}
+        report = ReviewReport(
+            repository=state["repository"], pull_request=state.get("pull_request"),
+            summary=self._summary(findings, len(parsed.files), risk), risk=risk,
+            findings=findings, files_reviewed=parsed.files, reviewer=self.reviewer.name,
+            collaboration=collaboration,
+            run_mode=run_mode, components=components, execution=execution,
+        )
+        return {"report": report.to_dict()}
 
     def _transition(self, target: TaskState, message: str) -> None:
-        self._check_budget("")
         if target == self._ctx.state:
             return
         if target not in ALLOWED.get(self._ctx.state, set()):
@@ -236,15 +182,13 @@ class ReviewHarness:
             TraceEvent(self._ctx.step, target, message, utc_now()),
         )
 
-    def _check_budget(self, task_id: str) -> None:
-        effective_task_id = task_id or getattr(self._ctx, "task_id", "")
-        if effective_task_id and self.store.is_cancelled(effective_task_id):
-            raise TaskCancelled("Task was cancelled")
-        if (
-            self._ctx.step >= self.max_steps
-            or time.monotonic() - self._ctx.started > self.timeout_seconds
-        ):
-            raise BudgetExceeded("task execution budget exceeded")
+    def _span(self, name: str, attributes: Dict[str, Any]):
+        if self.observability:
+            return self.observability.span(
+                name, str(attributes.get("task_id", "")), **attributes
+            )
+        from contextlib import nullcontext
+        return nullcontext()
 
     @staticmethod
     def _serialize_parsed(parsed: ParsedDiff) -> Dict[str, Any]:
@@ -276,6 +220,10 @@ class ReviewHarness:
             findings=[cls._finding_from_dict(item) for item in value.get("findings", [])],
             files_reviewed=list(value.get("files_reviewed", [])),
             reviewer=value.get("reviewer", "unknown"),
+            collaboration=dict(value.get("collaboration", {})),
+            run_mode=dict(value.get("run_mode", {})),
+            components=list(value.get("components", [])),
+            execution=dict(value.get("execution", {})),
         )
 
     @staticmethod
@@ -294,3 +242,35 @@ class ReviewHarness:
         return "Reviewed %d file(s); found %d actionable issue(s). Overall risk: %s." % (
             file_count, len(findings), risk,
         )
+
+    def _persisted_collaboration_summary(self, task_id: str) -> Dict[str, Any]:
+        task = self.store.get(task_id) or {}
+        messages = task.get("collaboration", [])
+        if not messages:
+            return {}
+        kinds = [item.get("kind", "") for item in messages]
+        roles = sorted({
+            value for item in messages
+            for value in (item.get("sender", ""), item.get("recipient", ""))
+            if value and value not in {"all", "review-report"}
+        })
+        rounds = [
+            int((item.get("content") or {}).get("round", 0))
+            for item in messages
+            if isinstance(item.get("content"), dict)
+        ]
+        final = next((
+            item.get("content") or {} for item in reversed(messages)
+            if item.get("kind") == "arbitration_decision"
+        ), {})
+        return {
+            "protocol": "plan-challenge-revise-evidence-verify-arbitrate",
+            "roles": roles,
+            "planned_assignments": kinds.count("assignment"),
+            "dialogue_rounds": max(rounds or [1]),
+            "messages": len(messages),
+            "retries": kinds.count("retry_request"),
+            "handoffs": kinds.count("assignment_handoff"),
+            "approved_findings": len(final.get("approved_findings", [])),
+            "rejected_findings": len(final.get("rejected_findings", [])),
+        }

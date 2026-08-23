@@ -4,6 +4,7 @@ The implementation mirrors TaskStore's public API and is selected when
 SECUREPR_DATABASE_URL starts with postgres. psycopg is an optional production
 dependency so local development can remain zero-config.
 """
+import hashlib
 import json
 from typing import Any, Dict, Optional
 
@@ -54,6 +55,21 @@ class PostgresTaskStore:
                 baseline_version INTEGER, decision TEXT NOT NULL, candidate_score DOUBLE PRECISION NOT NULL,
                 baseline_score DOUBLE PRECISION NOT NULL, metrics_json JSONB NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS skill_artifact_versions (
+                id BIGSERIAL PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+                skill_name TEXT NOT NULL, version INTEGER NOT NULL,
+                artifact_json JSONB NOT NULL, artifact_sha256 TEXT NOT NULL,
+                score DOUBLE PRECISION NOT NULL, active BOOLEAN NOT NULL DEFAULT FALSE,
+                parent_version INTEGER, created_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(tenant_id, skill_name, version))""",
+            """CREATE TABLE IF NOT EXISTS skill_evolution_runs (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+                skill_name TEXT NOT NULL, candidate_version INTEGER NOT NULL,
+                baseline_version INTEGER, decision TEXT NOT NULL,
+                candidate_score DOUBLE PRECISION NOT NULL, baseline_score DOUBLE PRECISION NOT NULL,
+                metrics_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)""",
+            "ALTER TABLE skill_artifact_versions ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE skill_evolution_runs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE installations ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
@@ -97,6 +113,15 @@ class PostgresTaskStore:
                 severity TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
                 created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
                 UNIQUE(tenant_id,alert_key,status))""",
+            """CREATE TABLE IF NOT EXISTS agent_memories (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, repository TEXT NOT NULL,
+                task_id TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
+                keywords_json JSONB NOT NULL, metadata_json JSONB NOT NULL,
+                importance DOUBLE PRECISION NOT NULL DEFAULT .5,
+                created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ)""",
+            """CREATE INDEX IF NOT EXISTS idx_agent_memories_lookup
+                ON agent_memories(tenant_id,repository,scope,created_at)""",
         ]
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -190,6 +215,78 @@ class PostgresTaskStore:
                  json.dumps(message.get("content", {}), ensure_ascii=False), utc_now()),
             )
 
+    def save_agent_memory(self, memory: Dict[str, Any]) -> Dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "INSERT INTO agent_memories(id,tenant_id,repository,task_id,agent,scope,kind,"
+                "content,keywords_json,metadata_json,importance,created_at,expires_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "importance=GREATEST(agent_memories.importance,EXCLUDED.importance),"
+                "expires_at=EXCLUDED.expires_at RETURNING *",
+                (
+                    memory["id"], memory["tenant_id"], memory["repository"],
+                    memory.get("task_id", ""), memory.get("agent", ""), memory["scope"],
+                    memory["kind"], memory["content"],
+                    json.dumps(memory.get("keywords", []), ensure_ascii=False),
+                    json.dumps(memory.get("metadata", {}), ensure_ascii=False),
+                    float(memory.get("importance", 0.5)), memory["created_at"],
+                    memory.get("expires_at"),
+                ),
+            ).fetchone()
+        return self._memory_from_row(row)
+
+    def list_agent_memories(
+        self, tenant_id: str, repository: str, scopes: tuple,
+        limit: int = 100,
+    ) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_memories WHERE tenant_id=%s AND repository=%s "
+                "AND scope=ANY(%s) AND (expires_at IS NULL OR expires_at>%s) "
+                "ORDER BY importance DESC,created_at DESC LIMIT %s",
+                (
+                    tenant_id, repository, list(scopes), utc_now(),
+                    max(1, min(limit, 500)),
+                ),
+            ).fetchall()
+        return [self._memory_from_row(row) for row in rows]
+
+    def delete_agent_memories(self, task_id: str = "", scope: str = "") -> int:
+        clauses = []
+        params = []
+        if task_id:
+            clauses.append("task_id=%s")
+            params.append(task_id)
+        if scope:
+            clauses.append("scope=%s")
+            params.append(scope)
+        if not clauses:
+            raise ValueError("memory deletion requires task_id or scope")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM agent_memories WHERE " + " AND ".join(clauses), params
+            )
+            return cursor.rowcount
+
+    def purge_expired_agent_memories(self) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM agent_memories WHERE expires_at IS NOT NULL AND expires_at<=%s",
+                (utc_now(),),
+            )
+            return cursor.rowcount
+
+    @staticmethod
+    def _memory_from_row(row) -> Dict[str, Any]:
+        value = dict(row)
+        value["keywords"] = value.pop("keywords_json")
+        value["metadata"] = value.pop("metadata_json")
+        for key in ("created_at", "expires_at"):
+            if value.get(key) is not None:
+                value[key] = value[key].isoformat()
+        return value
+
     def list_tasks(self, limit: int = 50, tenant_id: Optional[str] = None) -> list:
         with self._connect() as conn:
             where = " WHERE tenant_id=%s" if tenant_id is not None else ""
@@ -230,6 +327,29 @@ class PostgresTaskStore:
             rows = conn.execute(
                 "SELECT f.* FROM failure_cases" + joins + where
                 + " ORDER BY f.id DESC LIMIT %s", params
+            ).fetchall()
+        values = [dict(row) for row in rows]
+        for value in values:
+            value["payload"] = value.pop("payload_json")
+            value["created_at"] = value["created_at"].isoformat()
+        return values
+
+    def list_task_failure_cases(
+        self, task_id: str, tenant_id: Optional[str] = None,
+    ) -> list:
+        joins = " f"
+        clauses = ["f.task_id=%s"]
+        params = [task_id]
+        if tenant_id is not None:
+            joins += " JOIN tasks t ON t.id=f.task_id"
+            clauses.append("t.tenant_id=%s")
+            params.append(tenant_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT f.* FROM failure_cases" + joins
+                + " WHERE " + " AND ".join(clauses)
+                + " ORDER BY f.id DESC",
+                params,
             ).fetchall()
         values = [dict(row) for row in rows]
         for value in values:
@@ -320,6 +440,14 @@ class PostgresTaskStore:
             value["created_at"] = value["created_at"].isoformat()
         return values
 
+    def update_evolution_run(self, run_id: str, decision: str, metrics: Dict[str, Any]) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE evolution_runs SET decision=%s,metrics_json=%s::jsonb WHERE id=%s",
+                (decision, json.dumps(metrics, ensure_ascii=False), run_id),
+            )
+            return cursor.rowcount == 1
+
     def get_active_skill_version(self, skill_name: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             row = conn.execute(
@@ -358,6 +486,136 @@ class PostgresTaskStore:
             conn.execute("UPDATE skill_versions SET active=FALSE WHERE skill_name=%s", (skill_name,))
             conn.execute("UPDATE skill_versions SET active=TRUE WHERE skill_name=%s AND version=%s", (skill_name, version))
         return True
+
+    def save_skill_artifact(
+        self, skill_name: str, artifact: Dict[str, Any], score: float,
+        activate: bool = False, tenant_id: str = "default",
+    ) -> Dict[str, Any]:
+        artifact_json = json.dumps(
+            artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        artifact_sha256 = hashlib.sha256(artifact_json.encode("utf-8")).hexdigest()
+        active = self.get_active_skill_artifact(skill_name, tenant_id)
+        with self._connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("artifact:" + skill_name,))
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version),0) AS version FROM skill_artifact_versions "
+                "WHERE tenant_id=%s AND skill_name=%s", (tenant_id, skill_name),
+            ).fetchone()
+            version = int(row["version"]) + 1
+            if activate:
+                conn.execute(
+                    "UPDATE skill_artifact_versions SET active=FALSE WHERE tenant_id=%s AND skill_name=%s",
+                    (tenant_id, skill_name),
+                )
+            created_at = utc_now()
+            conn.execute(
+                "INSERT INTO skill_artifact_versions(tenant_id,skill_name,version,artifact_json,"
+                "artifact_sha256,score,active,parent_version,created_at) "
+                "VALUES (%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)",
+                (tenant_id, skill_name, version, artifact_json, artifact_sha256, float(score), activate,
+                 active["version"] if active else None, created_at),
+            )
+        return {
+            "tenant_id": tenant_id, "skill_name": skill_name, "version": version, "score": float(score),
+            "active": activate, "parent_version": active["version"] if active else None,
+            "artifact_sha256": artifact_sha256, "created_at": created_at,
+        }
+
+    @staticmethod
+    def _decode_skill_artifact(row) -> Dict[str, Any]:
+        value = dict(row)
+        value["artifact"] = value.pop("artifact_json")
+        value["active"] = bool(value["active"])
+        if hasattr(value.get("created_at"), "isoformat"):
+            value["created_at"] = value["created_at"].isoformat()
+        return value
+
+    def get_active_skill_artifact(
+        self, skill_name: str, tenant_id: str = "default",
+    ) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM skill_artifact_versions WHERE tenant_id=%s AND skill_name=%s "
+                "AND active=TRUE ORDER BY version DESC LIMIT 1", (tenant_id, skill_name),
+            ).fetchone()
+        return self._decode_skill_artifact(row) if row else None
+
+    def list_active_skill_artifacts(self, tenant_id: str = "default") -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM skill_artifact_versions WHERE tenant_id=%s AND active=TRUE "
+                "ORDER BY skill_name", (tenant_id,)
+            ).fetchall()
+        return [self._decode_skill_artifact(row) for row in rows]
+
+    def list_skill_artifact_versions(
+        self, skill_name: str, tenant_id: str = "default",
+    ) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM skill_artifact_versions WHERE tenant_id=%s AND skill_name=%s "
+                "ORDER BY version DESC", (tenant_id, skill_name),
+            ).fetchall()
+        return [self._decode_skill_artifact(row) for row in rows]
+
+    def activate_skill_artifact(
+        self, skill_name: str, version: int, tenant_id: str = "default",
+    ) -> bool:
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM skill_artifact_versions v WHERE v.tenant_id=%s "
+                "AND v.skill_name=%s AND v.version=%s AND (v.active=TRUE OR EXISTS ("
+                "SELECT 1 FROM skill_evolution_runs r WHERE r.tenant_id=v.tenant_id "
+                "AND r.skill_name=v.skill_name AND r.candidate_version=v.version "
+                "AND r.decision='activated'))",
+                (tenant_id, skill_name, version),
+            ).fetchone()
+            if not exists:
+                return False
+            conn.execute(
+                "UPDATE skill_artifact_versions SET active=FALSE WHERE tenant_id=%s AND skill_name=%s",
+                (tenant_id, skill_name),
+            )
+            conn.execute(
+                "UPDATE skill_artifact_versions SET active=TRUE WHERE tenant_id=%s AND skill_name=%s "
+                "AND version=%s", (tenant_id, skill_name, version),
+            )
+        return True
+
+    def save_skill_evolution_run(self, run: Dict[str, Any]) -> Dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO skill_evolution_runs(id,tenant_id,skill_name,candidate_version,baseline_version,"
+                "decision,candidate_score,baseline_score,metrics_json,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)",
+                (run["id"], run.get("tenant_id", "default"), run["skill_name"], run["candidate_version"],
+                 run.get("baseline_version"), run["decision"], run["candidate_score"],
+                 run["baseline_score"], json.dumps(run["metrics"], ensure_ascii=False),
+                 run["created_at"]),
+            )
+        return run
+
+    def list_skill_evolution_runs(
+        self, limit: int = 50, tenant_id: Optional[str] = None,
+    ) -> list:
+        with self._connect() as conn:
+            if tenant_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM skill_evolution_runs ORDER BY created_at DESC LIMIT %s",
+                    (max(1, min(limit, 200)),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM skill_evolution_runs WHERE tenant_id=%s "
+                    "ORDER BY created_at DESC LIMIT %s",
+                    (tenant_id, max(1, min(limit, 200))),
+                ).fetchall()
+        values = [dict(row) for row in rows]
+        for value in values:
+            value["metrics"] = value.pop("metrics_json")
+            value["created_at"] = value["created_at"].isoformat()
+        return values
 
     def save_task_payload(self, task_id: str, diff: str) -> None:
         with self._connect() as conn:
@@ -657,7 +915,18 @@ class PostgresTaskStore:
                     "SELECT COUNT(*) AS n FROM failure_cases f JOIN tasks t ON t.id=f.task_id "
                     "WHERE f.resolved=FALSE AND t.tenant_id=%s", (tenant_id,)
                 ).fetchone()["n"]
-            skills = conn.execute("SELECT COUNT(*) AS n FROM skill_versions WHERE active=TRUE").fetchone()["n"]
+            skills = conn.execute(
+                "SELECT COUNT(*) AS n FROM skill_versions WHERE active=TRUE"
+            ).fetchone()["n"]
+            if tenant_id is None:
+                skills += conn.execute(
+                    "SELECT COUNT(*) AS n FROM skill_artifact_versions WHERE active=TRUE"
+                ).fetchone()["n"]
+            else:
+                skills += conn.execute(
+                    "SELECT COUNT(*) AS n FROM skill_artifact_versions "
+                    "WHERE tenant_id=%s AND active=TRUE", (tenant_id,)
+                ).fetchone()["n"]
         return {"tasks_total": row["total"], "tasks_success": row["success"], "tasks_failed": row["failed"],
                 "success_rate": round(row["success"] / row["total"], 4) if row["total"] else 0.0,
                 "unresolved_failure_cases": failures, "active_skill_versions": skills}
