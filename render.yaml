@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: securepr-agent-demo
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: SECUREPR_HOST
+        value: 0.0.0.0
+      - key: SECUREPR_PORT
+        value: "10000"
+      - key: SECUREPR_DB_PATH
+        value: /tmp/securepr-demo.db
+      - key: SECUREPR_AUTH_REQUIRED
+        value: "false"
+      - key: SECUREPR_AUTO_POST_REVIEW
+        value: "false"
