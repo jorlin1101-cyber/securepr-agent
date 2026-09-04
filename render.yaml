@@ -15,6 +15,10 @@ services:
       - key: SECUREPR_DB_PATH
         value: /tmp/securepr-demo.db
       - key: SECUREPR_AUTH_REQUIRED
-        value: "false"
+        value: "true"
+      - key: SECUREPR_AUTH_SECRET
+        generateValue: true
+      - key: SECUREPR_GUEST_ACCESS_ENABLED
+        value: "true"
       - key: SECUREPR_AUTO_POST_REVIEW
         value: "false"

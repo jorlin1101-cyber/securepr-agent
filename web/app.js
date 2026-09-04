@@ -564,6 +564,29 @@ $("#login-form").addEventListener("submit", async (event) => {
   }
 });
 
+$("#guest-login").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  setButtonBusy(button, true, "正在创建访客会话…");
+  try {
+    const data = await api("/v1/auth/guest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    accessToken = data.access_token;
+    localStorage.setItem("securepr_agent_token", accessToken);
+    $("#login-overlay").classList.add("hidden");
+    $("#logout").classList.remove("hidden");
+    $("#login-error").textContent = "";
+    await loadDashboard();
+    toast("已进入访客演示工作区");
+  } catch (error) {
+    $("#login-error").textContent = error.message;
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
 $("#logout").addEventListener("click", () => {
   accessToken = "";
   localStorage.removeItem("securepr_agent_token");

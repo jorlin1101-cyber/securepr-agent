@@ -39,6 +39,21 @@ class ProductionFeatureTests(unittest.TestCase):
         self.assertIsNone(self.store.get("b", principal.tenant_id))
         self.assertEqual(["a"], [item["id"] for item in self.store.list_tasks(10, "tenant-a")])
 
+    def test_guest_session_is_scoped_and_cannot_manage(self):
+        auth = AuthManager(self.store, "a" * 32, default_tenant_id="demo-tenant")
+
+        session = auth.guest_login()
+        principal = auth.authenticate("Bearer " + session["access_token"])
+
+        self.assertEqual("portfolio-guest", principal.username)
+        self.assertEqual("demo-tenant", principal.tenant_id)
+        self.assertEqual("guest", principal.role)
+        self.assertTrue(principal.can("read"))
+        self.assertTrue(principal.can("review"))
+        self.assertFalse(principal.can("fix"))
+        self.assertFalse(principal.can("manage"))
+        self.assertFalse(principal.can("audit"))
+
     def test_webhook_delivery_is_idempotent_and_payload_bound(self):
         self.assertTrue(self.store.claim_webhook("delivery-1", "t", "pull_request", "aaa"))
         self.assertFalse(self.store.claim_webhook("delivery-1", "t", "pull_request", "aaa"))

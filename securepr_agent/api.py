@@ -324,6 +324,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(200, result)
                 return
+            if path == "/v1/auth/guest":
+                if not self.settings.auth_required:
+                    self._send_json(409, {"error": "authentication is disabled"})
+                    return
+                if not self.settings.guest_access_enabled:
+                    self._send_json(403, {"error": "guest access is disabled"})
+                    return
+                self._read_json(body)
+                self._send_json(200, self.service.auth.guest_login())
+                return
             if path == "/v1/reviews":
                 principal = self._principal("review")
                 payload = self._read_json(body)

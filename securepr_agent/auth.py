@@ -14,6 +14,7 @@ ROLE_PERMISSIONS = {
     "admin": {"read", "review", "fix", "manage", "audit"},
     "maintainer": {"read", "review", "fix"},
     "auditor": {"read", "audit"},
+    "guest": {"read", "review"},
 }
 
 
@@ -93,6 +94,26 @@ class AuthManager:
         token = self._encode(payload)
         return {"access_token": token, "token_type": "Bearer", "expires_in": self.ttl_seconds,
                 "tenant_id": selected, "role": memberships[selected]}
+
+    def guest_login(self) -> Dict[str, object]:
+        """Issue a short-lived, tenant-scoped demo session without exposing credentials."""
+        now = int(time.time())
+        role = "guest"
+        payload = {
+            "sub": str(uuid.uuid5(uuid.NAMESPACE_URL, "securepr:portfolio-guest")),
+            "username": "portfolio-guest",
+            "tenant": self.default_tenant_id,
+            "role": role,
+            "iat": now,
+            "exp": now + self.ttl_seconds,
+        }
+        return {
+            "access_token": self._encode(payload),
+            "token_type": "Bearer",
+            "expires_in": self.ttl_seconds,
+            "tenant_id": self.default_tenant_id,
+            "role": role,
+        }
 
     def authenticate(self, authorization: str) -> Principal:
         if not authorization.startswith("Bearer "):

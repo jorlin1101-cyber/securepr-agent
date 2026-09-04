@@ -100,6 +100,7 @@ class Settings:
     eval_max_metric_regression: float = 0.0
     auth_required: bool = False
     auth_secret: str = ""
+    guest_access_enabled: bool = False
     bootstrap_admin_username: str = ""
     bootstrap_admin_password: str = ""
     default_tenant_id: str = "default"
@@ -267,6 +268,7 @@ class Settings:
             ),
             auth_required=_bool("SECUREPR_AUTH_REQUIRED", True),
             auth_secret=os.getenv("SECUREPR_AUTH_SECRET", ""),
+            guest_access_enabled=_bool("SECUREPR_GUEST_ACCESS_ENABLED", False),
             bootstrap_admin_username=os.getenv("SECUREPR_BOOTSTRAP_ADMIN_USERNAME", ""),
             bootstrap_admin_password=os.getenv("SECUREPR_BOOTSTRAP_ADMIN_PASSWORD", ""),
             default_tenant_id=os.getenv("SECUREPR_DEFAULT_TENANT_ID", "default"),

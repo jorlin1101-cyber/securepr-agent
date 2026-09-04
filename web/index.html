@@ -274,6 +274,9 @@
       <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
       <label>租户 ID <span class="optional">可选</span><input name="tenant_id" placeholder="只有一个租户时可留空"></label>
       <button class="button" type="submit">安全登录</button>
+      <div class="login-divider"><span>或</span></div>
+      <button class="button login-guest" id="guest-login" type="button">以访客身份体验</button>
+      <p class="guest-note">无需管理员账号，可审查演示代码；系统管理权限保持关闭。</p>
       <p class="login-error" id="login-error" role="alert"></p>
     </form>
   </div>

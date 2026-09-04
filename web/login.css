@@ -51,6 +51,37 @@
   margin-top: 5px;
 }
 
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 17px 0 12px;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+}
+
+.login-card .login-guest {
+  border-color: rgba(244, 125, 48, .52);
+  background: rgba(244, 125, 48, .09);
+  color: #ff9b58;
+}
+
+.guest-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+  text-align: center;
+}
+
 .login-error {
   min-height: 18px;
   margin: 13px 0 0;
