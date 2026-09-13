@@ -1,8 +1,12 @@
 # SecurePR Agent — PR 风险审查与安全修复智能体
 
-[在线 Demo](https://securepr-agent-demo.onrender.com/) · [中文项目案例](https://jorlinshi.cn/projects/securepr-agent?lang=zh) · [作者作品集](https://jorlinshi.cn/?lang=zh)
+[在线 Demo](https://securepr-agent-demo.onrender.com/) · [中文项目案例](https://jorlinshi.cn/projects/securepr-agent?lang=zh) · [作者作品集](https://jorlinshi.cn/?lang=zh) · [English case study](https://jorlinshi.cn/projects/securepr-agent?lang=en)
 
-个人项目主要开发周期：2026.05 - 2026.06，后续持续维护。作者：石卓灵（Jorlin Shi）；联系邮箱：jorlin1101@163.com。
+个人项目主要开发周期：2026.05 - 2026.07，后续持续维护。作者：石卓灵（Jorlin Shi）；联系邮箱：jorlin1101@163.com。
+
+Main development: May–July 2026; maintained thereafter. The public demo may take a moment to start. Use guest access to explore controlled review examples.
+
+公网演示首次加载可能需要等待；可先阅读案例中的静态截图，再通过访客入口体验受控审查样例。
 
 [![CI](https://github.com/jorlin1101-cyber/securepr-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/jorlin1101-cyber/securepr-agent/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB.svg)](https://www.python.org/)
@@ -286,4 +290,3 @@ HTTP / GitHub Webhook
               ├── Critic Worker：由 Lead 委派的盲审、反例与证据挑战
               └── Gates
 ```
-
