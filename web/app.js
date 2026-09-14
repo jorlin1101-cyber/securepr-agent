@@ -335,18 +335,81 @@ async function loadSkills() {
   }
 }
 
+let evolutionAccess = { canRun: false, ready: false };
+
+function updateEvolutionSubmit() {
+  const form = $("#evolution-form");
+  const prompt = $('textarea[name="prompt"]', form);
+  const skill = $('input[name="skill_name"]', form);
+  const changed = Boolean(prompt.value.trim() && prompt.value.trim() !== prompt.defaultValue.trim());
+  $("#evolution-submit").disabled = !(
+    evolutionAccess.canRun && evolutionAccess.ready && skill.value.trim()
+    && changed
+  );
+  if (evolutionAccess.canRun && evolutionAccess.ready) {
+    $("#evolution-access-note").textContent = changed
+      ? "候选已修改；评测通过门禁后可能自动激活线上版本。"
+      : "请先修改候选提示词；评测通过门禁后可能自动激活线上版本。";
+  }
+}
+
+function setEvolutionAccess(status) {
+  const access = status?.access || {};
+  evolutionAccess = { canRun: Boolean(access.can_run_replay), ready: Boolean(status?.ready) };
+  $("#auto-evolve").disabled = !(evolutionAccess.canRun && evolutionAccess.ready);
+  const roleNames = { admin: "管理员", maintainer: "维护者", auditor: "审计员", guest: "访客" };
+  const role = roleNames[access.role] || "当前账号";
+  $("#evolution-access-note").textContent = !status
+    ? "暂时无法确认评测权限，请刷新后重试。"
+    : !evolutionAccess.canRun
+      ? `${role}无权运行回放；可以查看评测状态和记录。`
+      : !evolutionAccess.ready
+        ? "模型或评测集尚未就绪，暂时无法运行回放。"
+        : "请先修改候选提示词；评测通过门禁后可能自动激活线上版本。";
+  $("#evolution-switch-account").classList.toggle("hidden", !status || evolutionAccess.canRun);
+  updateEvolutionSubmit();
+}
+
+$("#evolution-form").addEventListener("input", updateEvolutionSubmit);
+$("#evolution-switch-account").addEventListener("click", () => $("#logout").click());
+
 async function loadFailures() {
-  try {
-    const [failuresData, status, runsData] = await Promise.all([
-      api("/api/failures"),
-      api("/v1/evolution/status"),
-      api("/v1/evolution/runs?limit=5"),
-    ]);
-    $("#evolution-status").textContent = formatJson(status);
-    const cases = failuresData.cases || [];
-    const runs = runsData.runs || [];
-    const failureHtml = cases.length
-      ? cases.slice(0, 8).map((item) => `
+  const [statusResult, runsResult] = await Promise.allSettled([
+    api("/v1/evolution/status"),
+    api("/v1/evolution/runs?limit=5"),
+  ]);
+  if (statusResult.status === "rejected") {
+    setEvolutionAccess(null);
+    $("#evolution-status").textContent = "暂时无法读取评测状态。";
+    $("#failure-list").innerHTML = '<div class="empty-state"><span>评测数据暂时无法读取</span></div>';
+    toast(statusResult.reason.message);
+    return;
+  }
+  const status = statusResult.value;
+  setEvolutionAccess(status);
+  $("#evolution-status").textContent = [
+    `模型：${status.model_configured ? `${status.provider} / ${status.model}` : "未配置"}`,
+    `验证集：${status.validation_cases} / ${status.minimum_cases} 条`,
+    `保留集：${status.holdout_cases} / ${status.minimum_holdout_cases} 条`,
+    `状态：${status.ready ? "已就绪" : "尚未就绪"}`,
+  ].join("\n");
+  let failuresData = null;
+  let failuresError = null;
+  if (status.access?.can_view_failures) {
+    try {
+      failuresData = await api("/api/failures");
+    } catch (error) {
+      failuresError = error;
+    }
+  }
+  const cases = failuresData?.cases || [];
+  const runs = runsResult.status === "fulfilled" ? (runsResult.value.runs || []) : [];
+  const failureHtml = !status.access?.can_view_failures
+    ? '<div class="empty-state"><span><b>当前账号无权查看失败案例</b>评测状态与记录仍可查看</span></div>'
+    : failuresError
+      ? `<div class="empty-state"><span>失败案例加载失败：${escapeHtml(failuresError.message)}</span></div>`
+      : cases.length
+        ? cases.slice(0, 8).map((item) => `
           <div class="task-row">
             <span class="task-main"><span class="task-glyph">FC</span><span class="task-copy">
               <span class="task-name">${escapeHtml(feedbackLabels[item.category] || item.category)}</span>
@@ -354,8 +417,10 @@ async function loadFailures() {
             </span></span>
             <span class="status ${item.resolved ? "state-success" : "state-pending"}">${item.resolved ? "已解决" : "待处理"}</span>
           </div>`).join("")
-      : '<div class="empty-state"><span><b>暂无失败反馈</b>系统当前没有未处理案例</span></div>';
-    const historyHtml = runs.length
+        : '<div class="empty-state"><span><b>暂无失败反馈</b>系统当前没有未处理案例</span></div>';
+  const historyHtml = runsResult.status === "rejected"
+    ? '<div class="empty-state"><span>评测记录暂时无法读取</span></div>'
+    : runs.length
       ? `<p class="list-section-label">最近评测</p>${runs.map((run) => `
           <div class="task-row">
             <span class="task-main"><span class="task-glyph">V${escapeHtml(run.candidate_version)}</span><span class="task-copy">
@@ -363,13 +428,8 @@ async function loadFailures() {
               <span class="task-meta">${Number(run.candidate_score).toFixed(3)} vs ${Number(run.baseline_score).toFixed(3)}</span>
             </span></span>
           </div>`).join("")}`
-      : "";
-    $("#failure-list").innerHTML = failureHtml + historyHtml;
-  } catch (error) {
-    $("#evolution-status").textContent = "暂时无法读取评测状态。";
-    $("#failure-list").innerHTML = '<div class="empty-state"><span>反馈加载失败</span></div>';
-    toast(error.message);
-  }
+      : '<div class="empty-state"><span>暂无回放评测记录</span></div>';
+  $("#failure-list").innerHTML = failureHtml + historyHtml;
 }
 
 $("#review-form").addEventListener("submit", async (event) => {
@@ -506,9 +566,12 @@ $("#evolution-form").addEventListener("submit", async (event) => {
     toast("新旧版本回放评测已完成");
     loadFailures();
   } catch (error) {
+    $("#evolution-result").classList.remove("empty");
+    $("#evolution-result").textContent = `评测未运行：${error.message}`;
     toast(error.message);
   } finally {
     setButtonBusy(button, false);
+    updateEvolutionSubmit();
   }
 });
 
@@ -526,9 +589,12 @@ $("#auto-evolve").addEventListener("click", async () => {
     toast("反馈候选评测已完成");
     loadFailures();
   } catch (error) {
+    $("#evolution-result").classList.remove("empty");
+    $("#evolution-result").textContent = `候选生成未运行：${error.message}`;
     toast(error.message);
   } finally {
     setButtonBusy(button, false);
+    $("#auto-evolve").disabled = !(evolutionAccess.canRun && evolutionAccess.ready);
   }
 });
 
@@ -564,6 +630,7 @@ $("#login-form").addEventListener("submit", async (event) => {
     $("#logout").classList.remove("hidden");
     $("#login-error").textContent = "";
     await loadDashboard();
+    if (location.hash.slice(1) === "evolution") await loadFailures();
   } catch (error) {
     $("#login-error").textContent = error.message;
   } finally {
@@ -586,6 +653,7 @@ $("#guest-login").addEventListener("click", async (event) => {
     $("#logout").classList.remove("hidden");
     $("#login-error").textContent = "";
     await loadDashboard();
+    if (location.hash.slice(1) === "evolution") await loadFailures();
     toast("已进入访客演示工作区");
   } catch (error) {
     $("#login-error").textContent = error.message;
@@ -597,6 +665,8 @@ $("#guest-login").addEventListener("click", async (event) => {
 $("#logout").addEventListener("click", () => {
   accessToken = "";
   localStorage.removeItem("securepr_agent_token");
+  setEvolutionAccess(null);
+  $("#evolution-status").textContent = "登录后可查看评测状态。";
   $("#login-overlay").classList.remove("hidden");
   $("#logout").classList.add("hidden");
 });

@@ -718,6 +718,9 @@ textarea { min-height: 150px; resize: vertical; font: 11px/1.7 "Cascadia Code", 
 .skill-meta { display: flex; align-items: center; color: var(--faint); font: 9px/1.4 "Cascadia Code", Consolas, monospace; }
 .skill-meta i { display: none; }
 .evolution-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.evolution-access { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; }
+.evolution-access .form-hint { margin: 0; }
+.evolution-access .text-button { color: var(--accent-bright); }
 
 .toast {
   position: fixed;

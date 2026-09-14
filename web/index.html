@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0b0d10">
   <title>SecurePR Agent · 智能代码审查控制台</title>
   <meta name="description" content="SecurePR Agent 多智能体代码审查、自动修复与 Skill 演进控制台">
-  <link rel="stylesheet" href="/assets/app.css?v=20260914.1">
+  <link rel="stylesheet" href="/assets/app.css?v=20260914.2">
   <link rel="stylesheet" href="/assets/login.css?v=20260805">
 </head>
 <body>
@@ -240,7 +240,7 @@
       <section class="view" id="view-evolution" aria-labelledby="page-title">
         <div class="section-heading inline">
           <div><h2>演进实验室</h2><p>将已提交的审查反馈转换为候选提示词，再用独立回放评测决定能否激活。</p></div>
-          <button class="button secondary" id="auto-evolve">从反馈生成候选</button>
+          <button class="button secondary" id="auto-evolve" disabled>从反馈生成候选</button>
         </div>
         <article class="evolution-purpose" aria-label="演进实验室的工作方式">
           <span><b>01</b>收集任务反馈</span><i aria-hidden="true"></i><span><b>02</b>生成候选提示词</span><i aria-hidden="true"></i><span><b>03</b>回放门禁后激活</span>
@@ -256,7 +256,11 @@
             <form id="evolution-form">
               <label>Skill 名称<input name="skill_name" value="llm-review" required></label>
               <label>候选提示词<textarea name="prompt" rows="11" required>Review the unified diff. Return JSON findings with severity, fix and test. Report only actionable defects introduced by added lines.</textarea></label>
-              <button class="button" type="submit">运行新旧版本回放评测</button>
+              <button class="button" id="evolution-submit" type="submit" disabled>运行新旧版本回放评测</button>
+              <div class="evolution-access">
+                <p class="form-hint" id="evolution-access-note" aria-live="polite">正在检查评测权限…</p>
+                <button class="text-button hidden" id="evolution-switch-account" type="button">切换管理员账号</button>
+              </div>
             </form>
           </article>
           <article class="panel">
@@ -290,6 +294,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260914.1"></script>
+  <script src="/assets/app.js?v=20260914.2"></script>
 </body>
 </html>

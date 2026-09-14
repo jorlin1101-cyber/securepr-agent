@@ -249,6 +249,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             status = self.service.evolution.status()
             status["provider"] = self.service.llm_config.get("provider", "local")
             status["model"] = self.service.llm_config.get("model", "")
+            status["access"] = {
+                "role": principal.role,
+                "can_run_replay": principal.can("manage"),
+                "can_view_failures": principal.can("audit"),
+            }
             self._send_json(200, status)
             return
         if path == "/v1/skill-evolution/status":
