@@ -18,11 +18,14 @@ const stateLabels = {
   FAILED: "失败",
   CANCELLED: "已取消",
 };
+const activeTaskStates = new Set(["PENDING", "PLANNING", "EXECUTING", "REVIEWING"]);
 
 let selectedTask = null;
 let selectedTaskData = null;
 let accessToken = localStorage.getItem("securepr_agent_token") || "";
 let toastTimer = null;
+let dashboardPollTimer = null;
+let dashboardRequestId = 0;
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 function escapeHtml(value) {
@@ -104,6 +107,7 @@ function show(view, updateHash = true) {
   if (updateHash) history.replaceState(null, "", `#${view}`);
 
   if (view === "tasks") loadTasks();
+  if (view === "overview" && updateHash) loadDashboard();
   if (view === "skills") loadSkills();
   if (view === "evolution") loadFailures();
   window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" });
@@ -194,9 +198,22 @@ function renderLlmRuntime(llm = {}, runMode = {}) {
   $("#llm-runtime-model").textContent = runtime;
 }
 
+function scheduleDashboardPoll(tasks) {
+  clearTimeout(dashboardPollTimer);
+  dashboardPollTimer = null;
+  if (document.hidden || !tasks.some((task) => activeTaskStates.has(String(task.state || "").toUpperCase()))) return;
+  dashboardPollTimer = setTimeout(async () => {
+    dashboardPollTimer = null;
+    await loadDashboard();
+    if ($("#view-tasks").classList.contains("active")) loadTasks(false);
+  }, 5000);
+}
+
 async function loadDashboard() {
+  const requestId = ++dashboardRequestId;
   try {
     const data = await api("/api/dashboard");
+    if (requestId !== dashboardRequestId) return;
     renderLlmRuntime(data.llm, data.run_mode);
     const modeSelect = $("#review-mode");
     if (modeSelect) {
@@ -221,7 +238,11 @@ async function loadDashboard() {
     ].join("");
     $("#recent-tasks").innerHTML = taskRows((data.tasks || []).slice(0, 5));
     bindTasks($("#recent-tasks"));
+    scheduleDashboardPoll(data.tasks || []);
   } catch (error) {
+    if (requestId !== dashboardRequestId) return;
+    clearTimeout(dashboardPollTimer);
+    dashboardPollTimer = null;
     renderLlmRuntime({ error: true }, {});
     $("#review-submit").disabled = true;
     $("#review-runtime-hint").textContent = "暂时无法读取模型状态，请稍后刷新。";
@@ -232,9 +253,9 @@ async function loadDashboard() {
   }
 }
 
-async function loadTasks() {
+async function loadTasks(showLoading = true) {
   const root = $("#all-tasks");
-  root.innerHTML = '<div class="list-loading"></div><div class="list-loading"></div>';
+  if (showLoading) root.innerHTML = '<div class="list-loading"></div><div class="list-loading"></div>';
   try {
     const data = await api("/api/tasks");
     root.innerHTML = taskRows(data.tasks || []);
@@ -663,6 +684,8 @@ $("#guest-login").addEventListener("click", async (event) => {
 });
 
 $("#logout").addEventListener("click", () => {
+  clearTimeout(dashboardPollTimer);
+  dashboardPollTimer = null;
   accessToken = "";
   localStorage.removeItem("securepr_agent_token");
   setEvolutionAccess(null);
@@ -698,6 +721,16 @@ function updateDiffStats() {
 }
 diffInput.addEventListener("input", updateDiffStats);
 updateDiffStats();
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearTimeout(dashboardPollTimer);
+    dashboardPollTimer = null;
+  } else {
+    loadDashboard();
+    if ($("#view-tasks").classList.contains("active")) loadTasks(false);
+  }
+});
 
 if (accessToken) $("#logout").classList.remove("hidden");
 show(location.hash.slice(1) || "overview", false);
