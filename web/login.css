@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 16px;
-  background: rgba(7, 8, 10, .88);
+  background: rgba(21, 19, 18, .42);
   backdrop-filter: blur(14px);
 }
 
@@ -14,8 +14,8 @@
   padding: 34px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-panel);
-  background: #14181e;
-  box-shadow: 0 30px 100px rgba(0, 0, 0, .52);
+  background: var(--surface);
+  box-shadow: 0 30px 100px rgba(35, 25, 20, .2);
 }
 
 .login-brand {
@@ -69,9 +69,9 @@
 }
 
 .login-card .login-guest {
-  border-color: rgba(244, 125, 48, .52);
-  background: rgba(244, 125, 48, .09);
-  color: #ff9b58;
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
 }
 
 .guest-note {
@@ -85,7 +85,7 @@
 .login-error {
   min-height: 18px;
   margin: 13px 0 0;
-  color: #ffabab;
+  color: var(--red);
   font-size: 11px;
 }
 
