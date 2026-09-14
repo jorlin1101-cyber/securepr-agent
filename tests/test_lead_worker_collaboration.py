@@ -10,6 +10,10 @@ from securepr_agent.store import TaskStore
 
 
 DIFF = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+eval(user_input)\n"
+EVAL_DIFF = (
+    "--- a/app/parser.py\n+++ b/app/parser.py\n@@ -4 +4 @@\n"
+    "-    return json.loads(raw)\n+    return eval(raw)\n"
+)
 
 
 class HierarchicalClient:
@@ -92,6 +96,34 @@ class HierarchicalClient:
         raise AssertionError((role, task))
 
 
+class OverlappingEvalClient(HierarchicalClient):
+    def complete_json(self, role, system, user, ledger=None, max_tokens=None):
+        if role == "correctness-reliability":
+            def proposed(rule_id, severity):
+                return {
+                    "rule_id": rule_id, "severity": severity,
+                    "title": rule_id,
+                    "explanation": "Review the parser change.",
+                    "path": "app/parser.py", "line": 4,
+                    "evidence": "return eval(raw)",
+                    "fix": "Restore json.loads(raw).",
+                    "test": "Check JSON values and invalid input.",
+                    "confidence": 0.9,
+                    "call_chain": [{
+                        "path": "app/parser.py", "line": 4,
+                        "symbol": "parse_user_input",
+                    }],
+                }
+
+            return {"action": "final", "findings": [
+                proposed("CORR-EVAL-EXC", "high"),
+                proposed("CORR-EVAL-FORMAT", "high"),
+                proposed("CORR-EVAL-RETURN", "high"),
+                proposed("CORR-EVAL-TESTS", "medium"),
+            ]}
+        return super().complete_json(role, system, user, ledger, max_tokens)
+
+
 class LeadWorkerCollaborationTests(unittest.TestCase):
     def setUp(self):
         handle, self.path = tempfile.mkstemp(suffix=".db")
@@ -116,8 +148,12 @@ class LeadWorkerCollaborationTests(unittest.TestCase):
         )
         summary = reviewer.collaboration_summary("task")
 
-        self.assertIn("SEC-LEAD-REVISION", {item.rule_id for item in findings})
+        self.assertIn("SEC-EVAL", {item.rule_id for item in findings})
         self.assertEqual("lead-workers", summary["collaboration"]["protocol"])
+        self.assertEqual(
+            ["SEC-LEAD-REVISION"],
+            [item["rule_id"] for item in summary["collaboration"]["publication_review"]],
+        )
         self.assertEqual(2, client.security_calls)
         self.assertEqual(1, len(summary["collaboration"]["revision_results"]))
         self.assertEqual("lead-final", summary["collaboration"]["stop_reason"])
@@ -145,10 +181,28 @@ class LeadWorkerCollaborationTests(unittest.TestCase):
             "task", DIFF, parse_unified_diff(DIFF), "org/repo"
         )
 
-        self.assertIn("SEC-LEAD-REVISION", {item.rule_id for item in findings})
+        self.assertIn("SEC-EVAL", {item.rule_id for item in findings})
         self.assertEqual([], resumed_client.calls)
         self.assertGreater(
             resumed.collaboration_summary("task")["execution"]["llm_calls"], 0
+        )
+
+    def test_eval_overlap_is_reduced_before_gate_and_report(self):
+        reviewer = ModeRouterReviewer(self.store, OverlappingEvalClient())
+
+        findings = reviewer.review_with_context(
+            "task", EVAL_DIFF, parse_unified_diff(EVAL_DIFF), "org/repo"
+        )
+        collaboration = reviewer.collaboration_summary("task")["collaboration"]
+
+        self.assertEqual(
+            ["SEC-EVAL", "CORR-EVAL-FORMAT"],
+            [item.rule_id for item in findings],
+        )
+        self.assertEqual(2, collaboration["accepted_findings"])
+        self.assertEqual(
+            {"CORR-EVAL-EXC", "CORR-EVAL-RETURN", "CORR-EVAL-TESTS"},
+            {item["rule_id"] for item in collaboration["publication_review"]},
         )
 
     def test_gate_decisions_are_archived_for_future_agent_recall(self):
@@ -157,7 +211,7 @@ class LeadWorkerCollaborationTests(unittest.TestCase):
 
         reviewer.review_with_context("task", DIFF, parse_unified_diff(DIFF), "org/repo")
 
-        episodes = memory.recall("default", "org/repo", "SEC-LEAD-REVISION")
+        episodes = memory.recall("default", "org/repo", "SEC-EVAL")
         self.assertTrue(any(item["kind"] == "finding_approved" for item in episodes))
         self.assertTrue(any(item["kind"] == "task_summary" for item in episodes))
 

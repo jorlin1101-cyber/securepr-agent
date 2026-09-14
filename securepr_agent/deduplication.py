@@ -23,6 +23,11 @@ _SEVERITY_SCORE = {
 
 
 def finding_category(finding: Finding) -> str:
+    # A rule's own identity is more specific than code shared by several
+    # findings on the same line (for example, a secret inside an eval call).
+    for category, pattern in _CATEGORY_PATTERNS:
+        if pattern.search(finding.rule_id):
+            return category
     searchable = " ".join((
         finding.rule_id,
         finding.title,
