@@ -112,7 +112,11 @@ class BoundedRole:
         working_memory_supplier=None, observation_sink=None,
     ):
         self.name = name
-        self.prompt = prompt
+        self.prompt = (
+            prompt.rstrip()
+            + '\nEvery response must have a top-level "action" key with the value '
+            '"tool" or "final". Do not wrap the action in another object.'
+        )
         self.client = client
         self.token_budget = token_budget
         self.time_budget = time_budget
@@ -177,6 +181,14 @@ class BoundedRole:
                 ledger, max_tokens=output_allowance,
             )
             kind = str(action.get("action", "")).strip().lower()
+            if not kind and action.get("tool"):
+                kind = "tool"
+            if not kind and any(key in action for key in (
+                "delegations", "revision_requests", "accepted_finding_indices",
+                "findings", "decisions",
+            )):
+                kind = "final"
+            action["action"] = kind
             ledger.trace(
                 self.name, "autonomous_decision", step=step, action=kind,
                 tool=str(action.get("tool", "")), reason=str(action.get("reason", ""))[:500],
@@ -187,7 +199,11 @@ class BoundedRole:
                 ledger.trace(self.name, "finished", step=step)
                 return action
             if kind != "tool":
-                raise ValueError("%s returned an invalid action" % self.name)
+                raise ValueError(
+                    "%s returned an invalid action (action=%s, keys=%s)" % (
+                        self.name, kind[:30], ",".join(sorted(action))[:200],
+                    )
+                )
             tool_name = str(action.get("tool", ""))
             arguments = action.get("arguments") or {}
             try:
