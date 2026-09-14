@@ -42,6 +42,18 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.create_review("org/repo", "x" * 10001)
 
+    def test_dashboard_counts_loaded_agent_skills(self):
+        service = ReviewService(self.settings)
+        try:
+            loaded = [
+                item for item in service.list_skills("default")
+                if item["kind"] == "agent-skill"
+            ]
+            self.assertGreater(len(loaded), 0)
+            self.assertEqual(len(loaded), service.dashboard_stats("default")["active_skills"])
+        finally:
+            service.queue.close()
+
     def test_completed_review_feedback_is_persisted_and_listed_per_task(self):
         diff = "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+eval(data)\n"
         service = enable_agentic_service(ReviewService(self.settings))

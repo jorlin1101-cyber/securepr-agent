@@ -173,7 +173,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             mode = resolve_mode(
                 None, bool(self.service.llm_config)
             )
-            self._send_json(200, {"stats": self.service.store.dashboard_stats(principal.tenant_id),
+            self._send_json(200, {"stats": self.service.dashboard_stats(principal.tenant_id),
                                   "tasks": self.service.store.list_tasks(10, principal.tenant_id),
                                   "queue": self.service.queue.backend,
                                   "orchestrator": self.service.reviewer.name,

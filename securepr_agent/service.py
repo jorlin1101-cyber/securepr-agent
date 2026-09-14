@@ -224,6 +224,11 @@ class ReviewService:
             "resources": list(skill.resource_paths),
         } for skill in self._active_agent_skills(tenant_id)]
 
+    def dashboard_stats(self, tenant_id: str) -> Dict[str, Any]:
+        stats = dict(self.store.dashboard_stats(tenant_id))
+        stats["active_skills"] = len(self._active_agent_skills(tenant_id))
+        return stats
+
     def _validate_review(self, repository: str, diff: str) -> None:
         if not repository or len(repository) > 250:
             raise ValueError("repository is required and must be at most 250 characters")

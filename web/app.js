@@ -234,7 +234,7 @@ async function loadDashboard() {
       statCard("失败", stats.tasks_failed ?? 0, "需要进一步处理", "failed", "ERR"),
       statCard("成功率", `${rate}%`, "全部任务成功率", "rate", "RATE"),
       statCard("待处理案例", stats.unresolved_failure_cases ?? 0, "未解决反馈", "feedback", "OPEN"),
-      statCard("活跃 Skills", stats.active_skill_versions ?? 0, "当前生效版本", "skills", "SK"),
+      statCard("活跃 Skills", stats.active_skills ?? 0, "当前可用能力", "skills", "SK"),
     ].join("");
     $("#recent-tasks").innerHTML = taskRows((data.tasks || []).slice(0, 5));
     bindTasks($("#recent-tasks"));
