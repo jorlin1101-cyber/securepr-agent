@@ -31,11 +31,16 @@ class JsonChatClient:
             "model": self.model,
             "temperature": 0,
             "messages": [
-                {"role": "system", "content": system},
+                {
+                    "role": "system",
+                    "content": system.rstrip() + "\nReturn exactly one complete JSON object; no markdown or additional objects.",
+                },
                 {"role": "user", "content": user},
             ],
             "response_format": {"type": "json_object"},
         }
+        if self.provider == "deepseek":
+            payload["thinking"] = {"type": "disabled"}
         if max_tokens:
             payload["max_tokens"] = int(max_tokens)
         headers = {
