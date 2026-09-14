@@ -49,7 +49,7 @@ class AdvancedFeatureTests(unittest.TestCase):
             **{**deepseek.__dict__, "llm_provider": "deepseek", "deepseek_api_key": "test-key"}
         )
         self.assertEqual("https://api.deepseek.com", deepseek.resolved_llm()["base_url"])
-        self.assertEqual("deepseek-v4-flash", deepseek.resolved_llm()["model"])
+        self.assertEqual("deepseek-flash", deepseek.resolved_llm()["model"])
 
         free = settings(self.path)
         free = free.__class__(

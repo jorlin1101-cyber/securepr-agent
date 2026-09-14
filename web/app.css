@@ -253,7 +253,7 @@ main { min-width: 0; padding: 0 40px 60px; }
 }
 .button:hover { background: var(--accent-bright); transform: translateY(-1px); }
 .button:active { transform: translateY(1px); }
-.button:disabled { opacity: .58; cursor: wait; transform: none; }
+.button:disabled { opacity: .58; cursor: not-allowed; transform: none; }
 .button.accent { color: #160f0a; background: var(--accent); }
 .button.secondary { color: var(--ink); background: var(--surface); border-color: var(--line); box-shadow: none; }
 .button.secondary:hover { background: var(--surface-hover); border-color: var(--line-strong); }
@@ -521,6 +521,14 @@ main { min-width: 0; padding: 0 40px 60px; }
 label { display: block; margin: 0 0 17px; color: #c5cbd2; font-size: 11px; font-weight: 640; }
 .field-label { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .field-meta { color: var(--faint); font: 500 9px/1.4 "Cascadia Code", Consolas, monospace; font-variant-numeric: tabular-nums; }
+.review-runtime-hint { margin: -9px 0 17px; color: var(--muted); font-size: 10px; }
+.diff-field { margin-bottom: 17px; }
+.diff-heading, .diff-actions { display: flex; align-items: center; gap: 16px; }
+.diff-heading { justify-content: space-between; }
+.diff-heading label { margin: 0; }
+.diff-actions { gap: 14px; }
+.diff-actions .text-button { color: var(--accent-bright); }
+.diff-actions .text-button:hover { color: var(--ink); }
 .optional { color: var(--faint); font-size: 9px; font-weight: 500; }
 input, select, textarea {
   display: block;
@@ -793,6 +801,8 @@ textarea { min-height: 150px; resize: vertical; font: 11px/1.7 "Cascadia Code", 
   .section-heading.inline { align-items: flex-start; flex-direction: column; }
   .section-heading h2 { font-size: 23px; }
   .field-row { grid-template-columns: 1fr; gap: 0; }
+  .diff-heading { align-items: flex-start; }
+  .diff-actions { flex-wrap: wrap; justify-content: flex-end; gap: 5px 12px; }
   .form-footer { align-items: stretch; flex-direction: column; }
   .form-footer .button { width: 100%; }
   .cards { grid-template-columns: 1fr; }

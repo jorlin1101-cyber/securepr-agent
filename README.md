@@ -109,6 +109,8 @@ python -m unittest discover -s tests -v
 
 DeepSeek 官方 API（按 Token 计费）：
 
+部署在 Render 的作品集演示：在该服务的 Environment 中保存 `SECUREPR_DEEPSEEK_API_KEY` 后，程序会自动启用 DeepSeek，默认调用 `deepseek-flash`。若显式设置了 `SECUREPR_LLM_PROVIDER=local`，请将其改为 `deepseek` 或删除；密钥不要写进仓库。公开访客审查在单个服务进程内限制为滚动 24 小时最多 20 次，建议同时在模型平台设置支出上限。
+
 ```powershell
 $env:SECUREPR_LLM_PROVIDER = 'deepseek'
 $env:SECUREPR_DEEPSEEK_API_KEY = '<deepseek-api-key>'

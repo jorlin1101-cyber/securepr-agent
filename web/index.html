@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0b0d10">
   <title>SecurePR Agent · 智能代码审查控制台</title>
   <meta name="description" content="SecurePR Agent 多智能体代码审查、自动修复与 Skill 演进控制台">
-  <link rel="stylesheet" href="/assets/app.css?v=20260805.5">
+  <link rel="stylesheet" href="/assets/app.css?v=20260914.1">
   <link rel="stylesheet" href="/assets/login.css?v=20260805">
 </head>
 <body>
@@ -104,7 +104,7 @@
 
       <section class="view" id="view-review" aria-labelledby="page-title">
         <div class="section-heading">
-          <div><h2>提交 Pull Request Diff</h2><p>选择规则、单模型或真实多模型模式，报告会披露实际调用成本。</p></div>
+          <div><h2>提交 Pull Request Diff</h2><p>提交代码变更，使用已配置的模型进行多角色审查。</p></div>
         </div>
         <div class="form-layout">
           <article class="panel form-panel">
@@ -118,16 +118,24 @@
                 </label>
               </div>
               <label>运行模式
-                <select name="mode" id="review-mode">
+                <select name="mode" id="review-mode" disabled>
                   <option value="agentic">agentic · 四个真实 LLM 角色</option>
                 </select>
               </label>
-              <label class="diff-field"><span class="field-label">Unified Diff <span class="field-meta" id="diff-stats" aria-live="polite">0 行，0 字符</span></span>
-                <textarea name="diff" rows="15" spellcheck="false" required placeholder="--- a/app.py&#10;+++ b/app.py&#10;@@ -1 +1 @@&#10;-old_value&#10;+new_value"></textarea>
-              </label>
+              <p class="review-runtime-hint" id="review-runtime-hint" aria-live="polite">正在读取模型配置…</p>
+              <div class="diff-field">
+                <div class="diff-heading">
+                  <label for="review-diff">Unified Diff</label>
+                  <div class="diff-actions">
+                    <span class="field-meta" id="diff-stats" aria-live="polite">0 行，0 字符</span>
+                    <button class="text-button" id="fill-review-example" type="button">一键填充示例</button>
+                  </div>
+                </div>
+                <textarea id="review-diff" name="diff" rows="15" spellcheck="false" required placeholder="--- a/app.py&#10;+++ b/app.py&#10;@@ -1 +1 @@&#10;-old_value&#10;+new_value"></textarea>
+              </div>
               <div class="form-footer">
                 <label class="check"><input name="async" type="checkbox" checked><span>放入异步队列</span></label>
-                <button class="button" type="submit">开始代码审查</button>
+                <button class="button" id="review-submit" type="submit" disabled>开始代码审查</button>
               </div>
             </form>
           </article>
@@ -282,6 +290,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260805.6"></script>
+  <script src="/assets/app.js?v=20260914.1"></script>
 </body>
 </html>

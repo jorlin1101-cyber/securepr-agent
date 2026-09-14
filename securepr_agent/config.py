@@ -151,7 +151,7 @@ class Settings:
                 "provider": "deepseek",
                 "base_url": self.llm_base_url or "https://api.deepseek.com",
                 "api_key": api_key,
-                "model": self.llm_model or "deepseek-v4-flash",
+                "model": self.llm_model or "deepseek-flash",
                 "headers": {},
             }
 
@@ -254,7 +254,10 @@ class Settings:
             github_app_slug=os.getenv("SECUREPR_GITHUB_APP_SLUG", ""),
             github_private_key_path=os.getenv("SECUREPR_GITHUB_PRIVATE_KEY_PATH", ""),
             public_base_url=os.getenv("SECUREPR_PUBLIC_BASE_URL", "http://127.0.0.1:8080").rstrip("/"),
-            llm_provider=os.getenv("SECUREPR_LLM_PROVIDER", "local"),
+            llm_provider=os.getenv(
+                "SECUREPR_LLM_PROVIDER",
+                "deepseek" if os.getenv("SECUREPR_DEEPSEEK_API_KEY") else "local",
+            ),
             deepseek_api_key=os.getenv("SECUREPR_DEEPSEEK_API_KEY", ""),
             openrouter_api_key=os.getenv("SECUREPR_OPENROUTER_API_KEY", ""),
             openrouter_site_url=os.getenv("SECUREPR_OPENROUTER_SITE_URL", ""),

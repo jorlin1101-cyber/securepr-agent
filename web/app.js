@@ -203,6 +203,11 @@ async function loadDashboard() {
       modeSelect.value = "agentic";
       modeSelect.disabled = !data.llm?.enabled;
     }
+    const reviewSubmit = $("#review-submit");
+    reviewSubmit.disabled = !data.llm?.enabled;
+    $("#review-runtime-hint").textContent = data.llm?.enabled
+      ? `当前模型：${data.llm.provider} / ${data.llm.model}`
+      : "当前未配置模型，暂时无法提交审查。";
     $("#system-status").textContent = `${data.queue} · ${data.orchestrator}`;
     const stats = data.stats || {};
     const rate = Math.round(Number(stats.success_rate || 0) * 100);
@@ -218,6 +223,8 @@ async function loadDashboard() {
     bindTasks($("#recent-tasks"));
   } catch (error) {
     renderLlmRuntime({ error: true }, {});
+    $("#review-submit").disabled = true;
+    $("#review-runtime-hint").textContent = "暂时无法读取模型状态，请稍后刷新。";
     $("#system-status").textContent = "服务连接异常";
     $("#stats").innerHTML = '<div class="empty-state"><span><b>暂时无法读取数据</b>请检查服务状态后重试</span></div>';
     $("#recent-tasks").innerHTML = '<div class="empty-state"><span>数据加载失败</span></div>';
@@ -596,6 +603,24 @@ $("#logout").addEventListener("click", () => {
 
 const diffInput = $('textarea[name="diff"]', $("#review-form"));
 const diffStats = $("#diff-stats");
+$("#fill-review-example").addEventListener("click", () => {
+  const form = $("#review-form");
+  $('input[name="repository"]', form).value = "demo/securepr-example";
+  $('input[name="pull_request"]', form).value = "";
+  diffInput.value = [
+    "diff --git a/app/parser.py b/app/parser.py",
+    "--- a/app/parser.py",
+    "+++ b/app/parser.py",
+    "@@ -1,4 +1,4 @@",
+    " import json",
+    " ",
+    " def parse_user_input(raw):",
+    "-    return json.loads(raw)",
+    "+    return eval(raw)",
+  ].join("\n");
+  diffInput.dispatchEvent(new Event("input", { bubbles: true }));
+  toast("已填入虚构示例，检查后可发起审查");
+});
 function updateDiffStats() {
   const value = diffInput.value;
   const lines = value ? value.split(/\r?\n/).length : 0;

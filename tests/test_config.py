@@ -3,10 +3,20 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from securepr_agent.config import load_dotenv
+from securepr_agent.config import Settings, load_dotenv
 
 
 class DotenvTests(unittest.TestCase):
+    def test_deepseek_key_enables_default_provider_without_overriding_explicit_local(self):
+        with patch.dict(os.environ, {"SECUREPR_DEEPSEEK_API_KEY": "test-key"}, clear=True):
+            configured = Settings.from_env()
+            self.assertEqual("deepseek", configured.llm_provider)
+            self.assertEqual("deepseek-flash", configured.resolved_llm()["model"])
+        with patch.dict(os.environ, {"SECUREPR_DEEPSEEK_API_KEY": "test-key", "SECUREPR_LLM_PROVIDER": "local"}, clear=True):
+            self.assertEqual({}, Settings.from_env().resolved_llm())
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual({}, Settings.from_env().resolved_llm())
+
     def test_loads_valid_assignments_and_quoted_values(self):
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
             handle.write("# comment\n")

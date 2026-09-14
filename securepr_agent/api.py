@@ -3,10 +3,13 @@ import json
 import mimetypes
 import os
 import re
+import time
 import urllib.parse
+from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict
+from threading import Lock
+from typing import Any, Dict, Optional
 
 from .config import Settings
 from .auth import Principal
@@ -31,9 +34,30 @@ SKILL_ARTIFACT_ACTIVATE = re.compile(
 WEB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web"))
 
 
+class GuestReviewBudget:
+    """Bound paid demo reviews across guest sessions in this server process."""
+
+    def __init__(self, limit: int = 20, window_seconds: int = 86400):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self.events = deque()
+        self.lock = Lock()
+
+    def reserve(self, now: Optional[float] = None) -> bool:
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            while self.events and self.events[0] <= now - self.window_seconds:
+                self.events.popleft()
+            if len(self.events) >= self.limit:
+                return False
+            self.events.append(now)
+            return True
+
+
 class ApiHandler(BaseHTTPRequestHandler):
     service: ReviewService
     settings: Settings
+    guest_review_budget = GuestReviewBudget()
     server_version = "SecurePR Agent/0.3"
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -360,6 +384,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "enabled_agents": enabled_agents,
                     "enabled_skills": enabled_skills,
                 }
+                if principal.role == "guest":
+                    self.service._validate_review(args[0], args[1])
+                    if not self.guest_review_budget.reserve():
+                        self._send_json(429, {"error": "演示审查次数已达上限，请稍后再试"})
+                        return
                 if query.get("async", ["false"])[0].lower() == "true":
                     result = self.service.enqueue_review(*args, **options)
                     self._send_json(202, result)
