@@ -32,6 +32,11 @@ class FindingPublicationTests(unittest.TestCase):
             ["SEC-EVAL", "CORR-EVAL-FORMAT"],
             [item.rule_id for item in published],
         )
+        compatibility = published[1]
+        self.assertEqual(Severity.HIGH, compatibility.severity)
+        self.assertNotIn("security", compatibility.explanation.lower())
+        self.assertNotIn("arbitrary", compatibility.explanation.lower())
+        self.assertIn("true, false and null", compatibility.explanation)
         self.assertEqual(
             {"CORR-EVAL-EXC", "CORR-EVAL-RETURN", "CORR-EVAL-TESTS"},
             {item["rule_id"] for item in suppressed},
@@ -89,6 +94,17 @@ class FindingPublicationTests(unittest.TestCase):
         ])
         self.assertEqual([], published)
         self.assertEqual("return contract lacks repository evidence", suppressed[0]["reason"])
+
+    def test_single_eval_contract_is_published_as_compatibility_only(self):
+        contract = finding("CORR-EVAL-CONTRACT", Severity.CRITICAL)
+        contract.explanation = "Compatibility, return semantics, and arbitrary code execution."
+
+        published, suppressed = consolidate_agentic_findings([contract])
+
+        self.assertEqual([], suppressed)
+        self.assertEqual("CORR-EVAL-FORMAT", published[0].rule_id)
+        self.assertEqual(Severity.HIGH, published[0].severity)
+        self.assertNotIn("code execution", published[0].explanation.lower())
 
 
 if __name__ == "__main__":

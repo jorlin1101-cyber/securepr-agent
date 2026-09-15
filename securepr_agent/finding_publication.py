@@ -56,6 +56,39 @@ def _quality(finding: Finding, identity: Tuple[str, int, str, str]) -> tuple:
     return directness, _SEVERITY[finding.severity], finding.confidence, detail
 
 
+def _normalize_published(
+    finding: Finding, identity: Tuple[str, int, str, str],
+) -> Finding:
+    if identity[-1] != "eval-compatibility":
+        return finding
+    return Finding(
+        rule_id="CORR-EVAL-FORMAT",
+        severity=Severity.HIGH,
+        title="JSON input compatibility changes under Python expression parsing",
+        explanation=(
+            "Replacing json.loads with eval changes the accepted input language and "
+            "failure behavior. Valid JSON literals such as true, false and null no "
+            "longer parse as JSON, while Python-only expressions may be accepted."
+        ),
+        path=finding.path,
+        line=finding.line,
+        evidence=finding.evidence,
+        fix=(
+            "Restore json.loads(raw). If Python literals are an explicit requirement, "
+            "use ast.literal_eval and document the different input and exception contract."
+        ),
+        test=(
+            "Cover valid JSON literals and objects, malformed JSON, and Python-only "
+            "expressions to preserve the documented parser behavior."
+        ),
+        confidence=finding.confidence,
+        evidence_refs=list(finding.evidence_refs),
+        call_chain=list(finding.call_chain),
+        source=finding.source,
+        gate=dict(finding.gate),
+    )
+
+
 def consolidate_agentic_findings(
     findings: Iterable[Finding],
 ) -> Tuple[List[Finding], List[Dict[str, object]]]:
@@ -82,14 +115,15 @@ def consolidate_agentic_findings(
         winner_index, winner = max(
             candidates, key=lambda item: _quality(item[1], identity),
         )
-        kept.append(winner)
+        published = _normalize_published(winner, identity)
+        kept.append(published)
         for index, finding in candidates:
             if index != winner_index:
                 suppressed.append({
                     "index": index, "rule_id": finding.rule_id,
                     "path": finding.path, "line": finding.line,
                     "reason": "same root cause as another published finding",
-                    "kept_rule_id": winner.rule_id,
+                    "kept_rule_id": published.rule_id,
                 })
 
     kept.sort(key=lambda item: (
