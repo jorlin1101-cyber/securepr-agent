@@ -99,6 +99,8 @@ python -m unittest discover -s tests -v
 
 ## 质量与安全边界
 
+[离线评测方法、记录结果与适用边界](docs/evaluation-report.md)
+
 - 本地规则与大模型对同一文件、同一行、同一风险类别的重复发现会合并，保留严重度、置信度和说明质量更高的一条。
 - 大模型生成的修复与测试建议会经过安全过滤；删除文件、清空数据、格式化磁盘和关机重启等破坏性命令不会进入任务报告或 PR 评论。
 - GitHub Actions 会在 Pull Request 中执行 Python 3.11 编译检查和完整单元测试。
